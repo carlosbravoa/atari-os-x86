@@ -35,9 +35,50 @@ static snd_pcm_uframes_t period_frames = 0;
 static snd_pcm_uframes_t buffer_frames = 0;
 static int can_pause = 0;
 
-/* Try these in order; an appliance has no asound.conf so "default" is
-   alsa-lib's built-in plug on card 0. */
-static const char *const device_names[] = { "default", "plughw:0,0", "hw:0,0", NULL };
+/* Card selection: laptops often have the HDMI codec as card 0 and the
+   analogue one (speakers, headphones) as card 1, so "default" would be
+   silent. Pick the first card with a playback PCM whose name is not
+   HDMI/DisplayPort-only. */
+static int pick_card(void)
+{
+	int card = -1, fallback = -1;
+	while (snd_card_next(&card) == 0 && card >= 0) {
+		snd_ctl_t *ctl;
+		snd_ctl_card_info_t *info;
+		char name[16];
+		int dev = -1, has_pcm = 0;
+		const char *cname;
+		snprintf(name, sizeof name, "hw:%d", card);
+		if (snd_ctl_open(&ctl, name, 0) < 0)
+			continue;
+		snd_ctl_card_info_alloca(&info);
+		snd_ctl_card_info(ctl, info);
+		cname = snd_ctl_card_info_get_name(info);
+		while (snd_ctl_pcm_next_device(ctl, &dev) == 0 && dev >= 0) {
+			snd_pcm_info_t *pi;
+			snd_pcm_info_alloca(&pi);
+			snd_pcm_info_set_device(pi, dev);
+			snd_pcm_info_set_subdevice(pi, 0);
+			snd_pcm_info_set_stream(pi, SND_PCM_STREAM_PLAYBACK);
+			if (snd_ctl_pcm_info(ctl, pi) == 0) {
+				const char *pname = snd_pcm_info_get_name(pi);
+				has_pcm = 1;
+				if (!strstr(pname, "HDMI") && !strstr(pname, "DP") && !strstr(pname, "DisplayPort")) {
+					Log_print("alsa: card %d \"%s\" device %d \"%s\"", card, cname, dev, pname);
+					snd_ctl_close(ctl);
+					return card * 100 + dev;
+				}
+			}
+		}
+		if (has_pcm && fallback < 0)
+			fallback = card * 100;
+		snd_ctl_close(ctl);
+	}
+	return fallback;
+}
+
+static char pcm_name[32] = "default";
+static char ctl_name[16] = "default";
 
 static int open_pcm(Sound_setup_t *setup)
 {
@@ -48,15 +89,21 @@ static int open_pcm(Sound_setup_t *setup)
 	unsigned int channels = setup->channels;
 	int err, i;
 
-	for (i = 0; device_names[i]; i++) {
-		err = snd_pcm_open(&pcm, device_names[i], SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
-		if (err == 0)
-			break;
+	{
+		int pick = pick_card();
+		if (pick >= 0) {
+			snprintf(pcm_name, sizeof pcm_name, "plughw:%d,%d", pick / 100, pick % 100);
+			snprintf(ctl_name, sizeof ctl_name, "hw:%d", pick / 100);
+		}
 	}
-	if (!device_names[i]) {
+	err = snd_pcm_open(&pcm, pcm_name, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+	if (err < 0)
+		err = snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+	if (err < 0) {
 		Log_print("alsa: no playback device: %s", snd_strerror(err));
 		return FALSE;
 	}
+	i = 0;
 
 	snd_pcm_hw_params_alloca(&hw);
 	snd_pcm_hw_params_any(pcm, hw);
@@ -97,8 +144,9 @@ static int open_pcm(Sound_setup_t *setup)
 	setup->buffer_frames = (unsigned int)period_frames;
 	frame_bytes = setup->channels * setup->sample_size;
 
+	(void)i;
 	Log_print("alsa: %s, %u Hz, %u ch, %u-bit, period %lu, buffer %lu frames",
-	          device_names[i], rate, channels, setup->sample_size * 8,
+	          pcm_name, rate, channels, setup->sample_size * 8,
 	          (unsigned long)period_frames, (unsigned long)buffer_frames);
 	return TRUE;
 
@@ -120,7 +168,7 @@ static void unmute_mixer(void)
 
 	if (snd_mixer_open(&mixer, 0) < 0)
 		return;
-	if (snd_mixer_attach(mixer, "default") < 0 && snd_mixer_attach(mixer, "hw:0") < 0) {
+	if (snd_mixer_attach(mixer, ctl_name) < 0 && snd_mixer_attach(mixer, "default") < 0) {
 		snd_mixer_close(mixer);
 		return;
 	}
@@ -153,11 +201,13 @@ int PLATFORM_SoundSetup(Sound_setup_t *setup)
 		snd_pcm_close(pcm);
 		pcm = NULL;
 	}
+	if (!open_pcm(setup))
+		return FALSE;
 	if (!mixer_done) {
 		unmute_mixer();
 		mixer_done = 1;
 	}
-	return open_pcm(setup);
+	return TRUE;
 }
 
 void PLATFORM_SoundExit(void)

@@ -22,14 +22,16 @@ BUILD=$WORK/build
 STAGE=$BUILD/stage          # packages unpacked here
 INITRAMFS=$BUILD/initramfs  # initramfs tree
 OUT=$BUILD/atari-os.img
-IMG_MB=${IMG_MB:-512}
+IMG_MB=${IMG_MB:-1024}
 
 # fbdev_emulation=0: no fbcon on the panel, ever. The emulator owns the
 # display; a late fbcon takeover otherwise commits over its scanout.
 CMDLINE="quiet loglevel=3 drm_kms_helper.fbdev_emulation=0 vt.global_cursor_default=0 ${EXTRA_CMDLINE:-}"
 
-# Firmware packages for the GPU drivers we load in phase 1. Wi-Fi comes later.
-FIRMWARE_PKGS="linux-firmware-i915 linux-firmware-radeon linux-firmware-nvidia linux-firmware-amdgpu"
+# Firmware: GPUs, Intel Wi-Fi (linux-firmware-intel carries iwlwifi), the
+# SOF audio DSP on 2019+ Intel laptops, and the wireless regulatory db.
+FIRMWARE_PKGS="linux-firmware-i915 linux-firmware-radeon linux-firmware-nvidia linux-firmware-amdgpu
+	linux-firmware-intel sof-firmware wireless-regdb"
 
 # Modules that must be inside the initramfs: enough to see the stick and
 # the keyboard before the modloop is available. Dependencies are resolved.
