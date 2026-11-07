@@ -323,6 +323,41 @@ static int hdd_resolve(const char *name, char *out, size_t size)
 #define VP_ROOT  1
 #define VP_PATH  2
 
+/* ASH shows sd: names cut to 27 characters and cannot type longer ones,
+   so a component that names no entry in `dir` but is the unique
+   case-insensitive prefix of one is completed to that entry's real name.
+   An exact (case-insensitive) match always wins. */
+static void sd_complete(const char *dir, char *comp, size_t size)
+{
+	DIR *d;
+	struct dirent *e;
+	char found[FILENAME_MAX];
+	int matches = 0;
+	size_t len = strlen(comp);
+
+	if (len == 0)
+		return;
+	d = opendir(dir);
+	if (!d)
+		return;
+	while ((e = readdir(d)) != NULL) {
+		if (e->d_name[0] == '.')
+			continue;
+		if (Util_stricmp(e->d_name, comp) == 0) {
+			matches = 1;
+			Util_strlcpy(found, e->d_name, sizeof found);
+			break;
+		}
+		if (Util_strnicmp(e->d_name, comp, len) == 0) {
+			matches++;
+			Util_strlcpy(found, e->d_name, sizeof found);
+		}
+	}
+	closedir(d);
+	if (matches == 1 && strlen(found) < size)
+		strcpy(comp, found);
+}
+
 /* sd: path -> host path. /atari/... is the stick's atari folder, /usb/...
    the USB drives; anything else at the root is refused, and so is any
    ".." component. *depth = number of components, *usb = under /usb. */
@@ -364,6 +399,7 @@ static int sd_path(const char *sd, char *out, size_t size, int *depth, int *usb)
 		else {
 			if (strlen(out) + 1 + len >= size)
 				return VP_BAD;
+			sd_complete(out, comp, sizeof comp);
 			strcat(out, "/");
 			strcat(out, comp);
 		}
