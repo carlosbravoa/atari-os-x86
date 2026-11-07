@@ -10,7 +10,7 @@
  *
  * Key layout (positional, US-style keycaps):
  *   F1 menu   F2 OPTION  F3 SELECT  F4 START   F5 reset (Shift: cold)
- *   F6 HELP   F7 BREAK   F8 System menu  F9 quit  F10 screenshot
+ *   F6 HELP   F7 BREAK   F8 System menu  F9 Library  F10 screenshot
  *   F11 arrows=joystick toggle
  *   F12 turbo `/Win = Atari (inverse)  Home = CLEAR  Ins/Del = insert/delete
  *   Arrows + left Alt = joystick 0 (after F11), numpad 8/2/4/6 + 0 always.
@@ -47,6 +47,7 @@
 #include "ui.h"
 #include "util.h"
 #include "kms/kms_input.h"
+#include "kms/kms_library.h"
 #include "kms/kms_sysmenu.h"
 
 int KMS_INPUT_arrows_joystick = FALSE; /* F11 toggles; FujiNet CONFIG and BASIC need cursor keys */
@@ -641,7 +642,9 @@ static int keyboard_inner(void)
 		}
 		return AKEY_BREAK;
 	case KEY_F9:
-		return AKEY_EXIT;
+		key_pressed = 0;
+		KMS_LIBRARY_requested = TRUE; /* never AKEY_EXIT: shutdown is in the menus */
+		return AKEY_NONE;
 	case KEY_F10:
 		key_pressed = 0;
 		return shift ? AKEY_SCREENSHOT_INTERLACE : AKEY_SCREENSHOT;

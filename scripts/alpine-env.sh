@@ -25,7 +25,7 @@ DL="$BUILD/downloads"
 
 # Packages for building our own code and assembling the image.
 BUILD_PKGS="alpine-base build-base autoconf automake libtool pkgconf git
-            linux-headers libdrm-dev alsa-lib-dev
+            linux-headers libdrm-dev alsa-lib-dev zlib-dev
             cpio squashfs-tools mtools xorriso dosfstools zstd curl"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }

@@ -9,7 +9,8 @@
  *   3. finds the boot stick, mounts it, and attaches the module/firmware
  *      squashfs ("modloop") so GPU, sound and network drivers can load,
  *   4. starts the emulator and keeps it running,
- *   5. powers the machine off on the power button, lid, or emulator exit.
+ *   5. powers the machine off on the power button, lid, or emulator exit,
+ *   6. mounts USB drives under /media/usb for the emulator's Library (F9).
  *
  * Kernel command line options:
  *   atari.debug=1      spawn a root shell on the serial console (ttyS0)
@@ -26,6 +27,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -47,6 +49,7 @@
 #include <drm/drm_mode.h>
 #include "font_atari.h"
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <linux/input.h>
 #include <linux/loop.h>
@@ -67,6 +70,7 @@
 #define WPA_CTRL_DIR "/run/wpa"
 #define SYSCONF      MEDIA_USER "/config/system.conf"
 #define MEDIA_WAIT_S 15
+#define USB_DIR      MEDIA "/usb"           /* USB drives, one folder each */
 
 static int debug = 0;
 static int nomedia = 0;
@@ -84,6 +88,7 @@ static int fujinet_enabled = 0;   /* FujiNet-PC process available */
 static int ctl_fd = -1;
 static int uevent_fd = -1;
 static int uevent_pending = 0;
+static int usb_pending = 0;       /* block devices changed: rescan USB drives */
 static char wifi_iface[32] = "";
 
 /* Persisted settings (system.conf on the stick). */
@@ -594,13 +599,16 @@ static void uevent_open(void)
 	}
 }
 
+static void usb_remove(const char *name);
+
 static void uevent_read(void)
 {
 	char buf[8192];
 	for (;;) {
 		ssize_t n = recv(uevent_fd, buf, sizeof buf - 1, 0);
 		char *p, *end;
-		int add = 0;
+		const char *devname = NULL;
+		int add = 0, block = 0;
 		if (n <= 0)
 			return;
 		buf[n] = '\0';
@@ -612,6 +620,18 @@ static void uevent_read(void)
 				queue_alias(p + 9);
 				uevent_pending = 1;
 			}
+			else if (strcmp(p, "SUBSYSTEM=block") == 0)
+				block = 1;
+			else if (strncmp(p, "DEVNAME=", 8) == 0)
+				devname = p + 8;
+		}
+		if (block) {
+			/* USB drives: unmount at once on removal, (re)scan shortly
+			   after anything else (the partitions follow the disk). */
+			if (strncmp(buf, "remove@", 7) == 0 && devname)
+				usb_remove(devname);
+			usb_pending = 1;
+			uevent_pending = 1;
 		}
 	}
 }
@@ -810,6 +830,255 @@ static void mount_modloop(void)
 		seen_count = 0;
 	}
 	logmsg("modloop attached");
+}
+
+/* ---- USB drives ---------------------------------------------------------- */
+
+/* Every filesystem on a USB drive (or SD card) other than the boot stick
+   is mounted at /media/usb/<label> for the emulator's Library (F9), which
+   finds them by listing that directory. A tmpfs over /media/usb keeps the
+   mount points off the stick's FAT. Internal disks are left alone. */
+#define MAX_USB      8
+#define MAX_IGNORED  16
+
+static struct { char dev[32]; char dir[96]; } usb_vols[MAX_USB];
+static int usb_count = 0;
+static char usb_ignored[MAX_IGNORED][32]; /* failed mounts, other atari-os sticks */
+static int usb_n_ignored = 0;
+static char boot_disks[2][32];            /* disk(s) holding MEDIA and HOSTFS */
+
+/* Whole-disk name ("sdb") for a /sys/class/block or /sys/dev/block link. */
+static int disk_of(const char *link, char *out, size_t size)
+{
+	char real[PATH_MAX], probe[PATH_MAX + 16];
+	char *last;
+	if (!realpath(link, real) || !(last = strrchr(real, '/')))
+		return 0;
+	snprintf(probe, sizeof probe, "%s/partition", real);
+	if (exists(probe)) {
+		*last = '\0';
+		if (!(last = strrchr(real, '/')))
+			return 0;
+	}
+	snprintf(out, size, "%s", last + 1);
+	return 1;
+}
+
+static void usb_find_boot_disks(void)
+{
+	const char *const mnts[2] = { MEDIA, HOSTFS };
+	int i;
+	for (i = 0; i < 2; i++) {
+		struct stat st;
+		char link[64];
+		boot_disks[i][0] = '\0';
+		if (stat(mnts[i], &st) != 0)
+			continue;
+		snprintf(link, sizeof link, "/sys/dev/block/%u:%u", major(st.st_dev), minor(st.st_dev));
+		if (exists(link))
+			disk_of(link, boot_disks[i], sizeof boot_disks[i]);
+	}
+}
+
+static int has_partitions(const char *disk)
+{
+	char path[300];
+	DIR *d;
+	struct dirent *e;
+	int found = 0;
+	snprintf(path, sizeof path, "/sys/class/block/%s", disk);
+	d = opendir(path);
+	while (d && !found && (e = readdir(d)) != NULL) {
+		char probe[600];
+		if (strncmp(e->d_name, disk, strlen(disk)) != 0)
+			continue;
+		snprintf(probe, sizeof probe, "%s/%s/partition", path, e->d_name);
+		found = exists(probe);
+	}
+	if (d)
+		closedir(d);
+	return found;
+}
+
+static int usb_ignored_index(const char *name)
+{
+	int i;
+	for (i = 0; i < usb_n_ignored; i++)
+		if (strcmp(usb_ignored[i], name) == 0)
+			return i;
+	return -1;
+}
+
+static void usb_ignore(const char *name)
+{
+	if (usb_ignored_index(name) < 0 && usb_n_ignored < MAX_IGNORED)
+		snprintf(usb_ignored[usb_n_ignored++], sizeof usb_ignored[0], "%.31s", name);
+}
+
+static int usb_index(const char *name)
+{
+	int i;
+	for (i = 0; i < usb_count; i++)
+		if (strcmp(usb_vols[i].dev, name) == 0)
+			return i;
+	return -1;
+}
+
+/* A block device we should try: on USB or an SD card, not the boot disk,
+   not a disk whose partitions are the real candidates. */
+static int usb_candidate(const char *name)
+{
+	char link[300], real[PATH_MAX], disk[64], path[400], type[16];
+	int i;
+	if (strncmp(name, "loop", 4) == 0 || strncmp(name, "ram", 3) == 0
+	    || strncmp(name, "zram", 4) == 0 || strncmp(name, "sr", 2) == 0)
+		return 0;
+	if (usb_index(name) >= 0 || usb_ignored_index(name) >= 0)
+		return 0;
+	snprintf(link, sizeof link, "/sys/class/block/%s", name);
+	if (!disk_of(link, disk, sizeof disk) || !realpath(link, real))
+		return 0;
+	for (i = 0; i < 2; i++)
+		if (boot_disks[i][0] && strcmp(disk, boot_disks[i]) == 0)
+			return 0;
+	if (!strstr(real, "/usb")) {
+		snprintf(path, sizeof path, "/sys/class/block/%s/device/type", disk);
+		if (strncmp(disk, "mmcblk", 6) != 0 || read_file(path, type, sizeof type) <= 0
+		    || strcmp(type, "SD") != 0)
+			return 0;
+	}
+	if (strcmp(disk, name) == 0 && has_partitions(name))
+		return 0;
+	return 1;
+}
+
+/* Value of KEY="..." in a blkid line. */
+static void blkid_tag(const char *line, const char *key, char *out, size_t size)
+{
+	char pat[16];
+	const char *p, *q;
+	size_t len;
+	out[0] = '\0';
+	snprintf(pat, sizeof pat, " %s=\"", key);
+	p = strstr(line, pat);
+	if (!p)
+		return;
+	p += strlen(pat);
+	q = strchr(p, '"');
+	len = q ? (size_t)(q - p) : strlen(p);
+	if (len >= size)
+		len = size - 1;
+	memcpy(out, p, len);
+	out[len] = '\0';
+}
+
+static void usb_mount(const char *name)
+{
+	char dev[48], out[512], label[64], type[16], dir[96], probe[160];
+	char *blkid[] = { BUSYBOX, "blkid", dev, NULL };
+	const char *fstype, *opts = "";
+	int i;
+
+	snprintf(dev, sizeof dev, "/dev/%.31s", name);
+	if (strlen(name) > 31 || !exists(dev) || usb_count >= MAX_USB)
+		return;
+	run_output(blkid, out, sizeof out);
+	blkid_tag(out, "TYPE", type, sizeof type);
+	blkid_tag(out, "LABEL", label, sizeof label);
+	if (strcmp(type, "vfat") == 0) {
+		fstype = "vfat";
+		opts = "flush,shortname=mixed,errors=continue";
+	}
+	else if (strcmp(type, "exfat") == 0)
+		fstype = "exfat";
+	else if (strcmp(type, "ntfs") == 0)
+		fstype = "ntfs3";
+	else
+		return; /* no filesystem we can share (or a partition table) */
+
+	/* The folder name: the label, sanitised, else the device name. */
+	for (i = 0; label[i]; i++)
+		if (!isalnum((unsigned char)label[i]) && label[i] != '_' && label[i] != '-')
+			label[i] = '_';
+	while (i > 0 && label[i - 1] == '_')
+		label[--i] = '\0';
+	snprintf(dir, sizeof dir, USB_DIR "/%.31s", label[0] ? label : name);
+	if (exists(dir))
+		snprintf(dir, sizeof dir, USB_DIR "/%.31s-%.20s", label[0] ? label : name, name);
+	mkdir(dir, 0755);
+	if (mount(dev, dir, fstype, MS_NOATIME | MS_NOSUID | MS_NODEV, opts) != 0) {
+		logmsg("usb: cannot mount %s (%s): %s", dev, fstype, strerror(errno));
+		rmdir(dir);
+		usb_ignore(name);
+		return;
+	}
+	snprintf(probe, sizeof probe, "%s/atari-os/modloop.sqfs", dir);
+	if (exists(probe)) {
+		logmsg("usb: %s is another atari-os stick, not used", dev);
+		umount2(dir, MNT_DETACH);
+		rmdir(dir);
+		usb_ignore(name);
+		return;
+	}
+	snprintf(usb_vols[usb_count].dev, sizeof usb_vols[0].dev, "%.31s", name);
+	snprintf(usb_vols[usb_count].dir, sizeof usb_vols[0].dir, "%s", dir);
+	usb_count++;
+	logmsg("usb: %s (%s) mounted at %s", dev, fstype, dir);
+}
+
+static void usb_unmount(int i, int flags)
+{
+	if (umount2(usb_vols[i].dir, flags) != 0)
+		umount2(usb_vols[i].dir, MNT_DETACH);
+	rmdir(usb_vols[i].dir);
+	logmsg("usb: %s unmounted", usb_vols[i].dir);
+	usb_vols[i] = usb_vols[--usb_count];
+}
+
+static void usb_remove(const char *name)
+{
+	int i = usb_index(name);
+	if (i >= 0)
+		usb_unmount(i, MNT_DETACH);
+	i = usb_ignored_index(name);
+	if (i >= 0) /* plugged in again later: try afresh */
+		memcpy(usb_ignored[i], usb_ignored[--usb_n_ignored], sizeof usb_ignored[0]);
+}
+
+static void usb_scan(void)
+{
+	DIR *d;
+	struct dirent *e;
+	int i;
+	char dev[320];
+
+	for (i = usb_count - 1; i >= 0; i--) {
+		snprintf(dev, sizeof dev, "/dev/%s", usb_vols[i].dev);
+		if (!exists(dev))
+			usb_unmount(i, MNT_DETACH);
+	}
+	d = opendir("/sys/class/block");
+	while (d && (e = readdir(d)) != NULL)
+		if (e->d_name[0] != '.' && usb_candidate(e->d_name))
+			usb_mount(e->d_name);
+	if (d)
+		closedir(d);
+}
+
+static void usb_setup(void)
+{
+	mkdir_p(USB_DIR, 0755);
+	if (mount("tmpfs", USB_DIR, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755,size=64k") != 0)
+		logmsg("usb: tmpfs on %s failed: %s", USB_DIR, strerror(errno));
+	usb_find_boot_disks();
+	usb_scan();
+}
+
+static void usb_unmount_all(void)
+{
+	while (usb_count > 0)
+		usb_unmount(usb_count - 1, 0);
+	umount2(USB_DIR, MNT_DETACH);
 }
 
 /* ---- networking ---------------------------------------------------------- */
@@ -1043,6 +1312,7 @@ static void start_emulator(void)
 		mkdir_p(MEDIA_USER "/disks", 0755);
 		mkdir_p(MEDIA_USER "/carts", 0755);
 		mkdir_p(MEDIA_USER "/roms", 0755);
+		mkdir_p(MEDIA_USER "/library", 0755);
 	}
 
 	argv[n++] = EMULATOR;
@@ -1254,6 +1524,8 @@ static void cmd_status(int fd)
 	snprintf(line, sizeof line, "fujinet %s\nssh %s\npassword %s\nefi %s\nmedia %s\n",
 	         fujinet_enabled && conf.fujinet_boot ? "on" : "off", ssh_pid > 0 ? "on" : "off",
 	         conf.rootpw[0] ? "set" : "none", efi_ok ? "yes" : "no", media_kind);
+	reply(fd, line);
+	snprintf(line, sizeof line, "usb %d\n", usb_count);
 	reply(fd, line);
 
 	/* first non-loopback IPv4 address */
@@ -1533,6 +1805,7 @@ static void shutdown_machine(int how)
 	sleep_ms(300);
 	kill(-1, SIGKILL);
 	sync();
+	usb_unmount_all();
 	if (media_mounted)
 		umount2(MEDIA, 0);
 	umount2(HOSTFS, 0); /* image-file (Ventoy) case; harmless otherwise */
@@ -1665,6 +1938,7 @@ int main(void)
 	   while it runs are not lost. */
 	uevent_open();
 	coldplug();
+	usb_setup(); /* drives plugged in at boot; later ones arrive as uevents */
 	/* The native GPU driver may have replaced the firmware framebuffer. */
 	splash_open();
 	splash_line("Hardware ready");
@@ -1722,6 +1996,10 @@ int main(void)
 			if (uevent_pending) {
 				uevent_pending = 0;
 				flush_batch();
+				if (usb_pending) {
+					usb_pending = 0;
+					usb_scan();
+				}
 				continue;
 			}
 			if (!logs_saved) {

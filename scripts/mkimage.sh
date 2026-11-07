@@ -199,7 +199,7 @@ log "Assembling stick content"
 STICK=$BUILD/stick
 rm -rf "$STICK"
 mkdir -p "$STICK/EFI/BOOT" "$STICK/atari-os" "$STICK/atari/disks" "$STICK/atari/carts" \
-	"$STICK/atari/roms" "$STICK/atari/config"
+	"$STICK/atari/roms" "$STICK/atari/config" "$STICK/atari/library"
 cp /usr/share/limine/BOOTX64.EFI "$STICK/EFI/BOOT/"
 cp /usr/share/limine/limine-bios.sys "$STICK/"
 cp "$STAGE/boot/vmlinuz-lts" "$STICK/atari-os/vmlinuz"
@@ -242,13 +242,15 @@ fi
 cat > "$STICK/atari/README.txt" <<'EOF'
 atari-os-x86 - this stick boots an Atari 8-bit computer.
 
+  library/ your collection: any folders, any Atari files (F9 = Library)
   disks/   put .ATR/.XFD/.DCM disk images here
   carts/   put .CAR/.ROM cartridges here
   roms/    optional real Atari OS ROMs (ATARIXL.ROM, ATARIBAS.ROM ...)
   config/  emulator configuration (saved automatically)
 
 Keys: F1 menu, F2 OPTION, F3 SELECT, F4 START, F5 reset (Shift+F5 cold),
-      F6 HELP, F7 BREAK, F9 quit (powers off), F11 toggle arrows joystick.
+      F6 HELP, F7 BREAK, F8 System menu (shut down there), F9 Library,
+      F11 toggle arrows joystick.
       Arrows + left Alt = joystick 0.  Numpad 8/2/4/6 + 0 = joystick 0.
 EOF
 

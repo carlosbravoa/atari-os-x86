@@ -6,9 +6,14 @@
 #   scripts/qemu-test.sh key <qemu-key>      press a key (QEMU sendkey names, e.g. ret, f1, a)
 #   scripts/qemu-test.sh shot <file.png>     screenshot
 #   scripts/qemu-test.sh log [n]             last n lines of the serial log
+#   scripts/qemu-test.sh mon "<cmd>"         QEMU monitor command (e.g. device_add for hotplug)
 #   scripts/qemu-test.sh stop
 #
 # Sockets and logs live in $QEMU_TEST_DIR (default: build/qemu-test).
+# QEMU_EXTRA adds arguments to the QEMU command line, e.g. a second USB
+# stick (scripts/mk-usb-test.sh builds one):
+#   QEMU_EXTRA="-drive if=none,id=usb2,format=raw,file=build/usb-test.img
+#     -device usb-storage,bus=xhci.0,drive=usb2,removable=on" scripts/qemu-test.sh start
 
 set -eu
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,7 +70,7 @@ start)
 		-chardev socket,id=ser,path="$D/serial.sock",server=on,wait=off,logfile="$D/serial.log" \
 		-serial chardev:ser \
 		-monitor unix:"$D/mon.sock",server,nowait \
-		-snapshot -display none -no-reboot > "$D/qemu.out" 2>&1 &
+		-snapshot -display none -no-reboot ${QEMU_EXTRA:-} > "$D/qemu.out" 2>&1 &
 	echo $! > "$D/qemu.pid"
 	echo "started pid $(cat "$D/qemu.pid")"
 	;;
@@ -73,6 +78,7 @@ serial) py serial "$2" "${3:-2}" ;;
 key) py mon "sendkey $2" 0.5 >/dev/null ;;
 shot) py mon "screendump $2 -f png" 1.5 >/dev/null; ls -la "$2" ;;
 log) tail -n "${2:-40}" "$D/serial.log" ;;
+mon) py mon "$2" "${3:-1}" | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/\r//g' | grep -vF -e "$2" -e "(qemu)" || true ;;
 stop) [ -f "$D/qemu.pid" ] && kill "$(cat "$D/qemu.pid")" 2>/dev/null; rm -f "$D/qemu.pid"; echo stopped ;;
-*) echo "usage: $0 start|serial|key|shot|log|stop" >&2; exit 1 ;;
+*) echo "usage: $0 start|serial|key|shot|log|mon|stop" >&2; exit 1 ;;
 esac

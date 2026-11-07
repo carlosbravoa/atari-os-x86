@@ -37,12 +37,27 @@ core is the planned second core.
 ```
 /EFI/BOOT/BOOTX64.EFI   /limine-bios.sys   /limine.conf
 /atari-os/vmlinuz  initramfs  modloop.sqfs      ← the system (replace to update)
-/atari/disks  carts  roms  config               ← yours
+/atari/library  disks  carts  roms  config      ← yours
 /atari/fujinet/fnconfig.ini  SD/                ← FujiNet's config and "SD card"
 ```
 
-Drop `.ATR` disk images in `disks/`, cartridges in `carts/`, and (optionally)
-real Atari ROMs in `roms/`. Without ROMs the built-in Altirra OS is used.
+Drop your collection (any folders, any Atari files) in `library/`, and
+(optionally) real Atari ROMs in `roms/`. Without ROMs the built-in Altirra
+OS is used.
+
+## The Library (F9)
+
+F9 (or the first entry of the F1 menu) opens a browser over three kinds of
+source, cycled with **Tab**: the `library/` folder on the stick, every USB
+drive plugged in (init mounts them under `/media/usb/<label>`; a border hint
+says so when one appears), and FujiNet's `fujinet/SD/` folder. RETURN on a
+folder enters it, Backspace or Esc goes back up; RETURN on a file offers
+**Run**, **Mount as D1:** (or insert the cartridge/tape), **Copy to** any
+other source (keeping the folder path; "Safe to unplug" once it is synced),
+and **Favourite**. The Library root lists the last 8 programs run and the
+favourites (`atari/config/library.cfg`). Multi-disk sets named
+`... (Disk 1)...`, `..._d1...` or `... Side 1...` get disks 2-4 in D2:-D4:.
+A filter entry narrows the listing to matching file names.
 
 ## The System menu (F8)
 
@@ -58,7 +73,8 @@ style as the emulator's own, backed by PID 1 over a Unix socket:
   sound card, Wi-Fi, IP, battery, boot medium, kernel
 - **Reboot straight back into Atari** (UEFI `BootNext`, a one-shot request
   for the next start only; the machine's boot order is never touched)
-- Save logs to the stick, restart emulator, reboot, shut down
+- Save logs to the stick, restart emulator, reboot, **shut down** (besides
+  the power button, the only way to power off: F9 no longer quits)
 
 Boot shows an Atari-style splash with progress lines; the first boots show
 an "F8 = System menu" hint under the picture until the menu is opened once.
@@ -101,7 +117,7 @@ cold resets instead of restarting itself.
 | F5, Shift+F5 | warm / cold reset |
 | F6, F7 | HELP, BREAK |
 | F8 | System menu (FujiNet, volume, brightness, Wi-Fi, SSH, power) |
-| F9 | quit (powers the laptop off) |
+| F9 | Library: browse, run and copy Atari files (stick, USB drives, FujiNet SD) |
 | F10 | screenshot (PCX, saved next to the config) |
 | F11 | toggle arrow keys between cursor keys (default) and joystick 0 |
 | Arrows + left Alt | joystick 0 after F11 (numpad 8/2/4/6 + 0 always) |
@@ -141,8 +157,16 @@ console and verbose kernel messages.
 
 `scripts/qemu-test.sh` drives QEMU without a display: `start [bios|uefi]`,
 `key <name>` (QEMU sendkey names), `shot <png>`, `serial "<cmd>"` (runs a
-command on the debug shell), `log`, `stop`. Build a debug image with
+command on the debug shell), `log`, `mon "<cmd>"` (QEMU monitor), `stop`.
+Build a debug image with
 `EXTRA_CMDLINE="console=ttyS0,115200 atari.debug=1"` for `serial` to work.
+`QEMU_EXTRA` adds QEMU arguments; `scripts/mk-usb-test.sh` builds
+`build/usb-test.img`, a USB drive with Atari files for the Library:
+
+```sh
+QEMU_EXTRA="-drive if=none,id=usb2,format=raw,file=build/usb-test.img \
+  -device usb-storage,bus=xhci.0,drive=usb2,removable=on" scripts/qemu-test.sh start
+```
 
 Kernel command-line knobs for debugging: `atari.debug=1` (serial shell,
 `-evdev-debug -kms-debug` on the emulator, emulator exit restarts instead of

@@ -32,7 +32,7 @@ if [ ! -f Makefile ] || [ "$SRC/configure" -nt Makefile ]; then
 		--with-video=kms --with-sound=alsa \
 		--enable-netsio \
 		--without-readline --without-x \
-		--with-png=no --with-mp3=no --with-zlib=no \
+		--with-png=no --with-mp3=no --with-zlib=yes \
 		--disable-monitorbreak --disable-monitortrace \
 		CFLAGS="-O2 -pipe -I/work/common"
 fi

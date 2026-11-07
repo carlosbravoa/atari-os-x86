@@ -91,7 +91,7 @@ index 61d89b4a..24175205 100644
  AM_CONDITIONAL([WITH_SOUND_SDL2], test "$with_sound" = sdl2)
  AM_CONDITIONAL([WITH_SOUND_DOSSB], test "$with_sound" = dossb)
 diff --git a/src/Makefile.am b/src/Makefile.am
-index a1491602..82ec43dd 100644
+index a1491602..87691d1d 100644
 --- a/src/Makefile.am
 +++ b/src/Makefile.am
 @@ -124,6 +124,9 @@ endif
@@ -104,7 +104,7 @@ index a1491602..82ec43dd 100644
  if WITH_SOUND_LIBATARI800
  atari800_SOURCES += sound.c libatari800/sound.c libatari800/sound.h
  endif
-@@ -212,6 +215,14 @@ atari800_SOURCES += \
+@@ -212,6 +215,15 @@ atari800_SOURCES += \
  atari800_SOURCES += pbi_proto80.c pbi_proto80.h af80.c af80.h bit3.c bit3.h
  endif
  
@@ -113,27 +113,40 @@ index a1491602..82ec43dd 100644
 +	kms/main.c \
 +	kms/video.c kms/kms_video.h \
 +	kms/input.c kms/kms_input.h \
-+	kms/sysmenu.c kms/kms_sysmenu.h
++	kms/sysmenu.c kms/kms_sysmenu.h \
++	kms/library.c kms/kms_library.h
 +endif
 +
  if WITH_VIDEO_DOSVGA
  atari800_SOURCES += dos/atari_vga.c dos/vga_gfx.c dos/vga_gfx.h dos/vga_asm.s dos/dos_ints.h
  endif
 diff --git a/src/ui.c b/src/ui.c
-index 5b651bcf..12631227 100644
+index 5b651bcf..3366bb37 100644
 --- a/src/ui.c
 +++ b/src/ui.c
-@@ -65,6 +65,9 @@
+@@ -65,6 +65,11 @@
  #include "statesav.h"
  #include "sysrom.h"
  #include "ui.h"
 +#ifdef KMS
 +#include "kms/kms_sysmenu.h" /* atari-os-x86: the F8 System menu */
++#include "kms/kms_library.h" /* atari-os-x86: the F9 Library */
++#define UI_MENU_LIBRARY 90
 +#endif
  #include "ui_basic.h"
  #ifdef XEP80_EMULATION
  #include "xep80.h"
-@@ -4496,11 +4499,19 @@ void UI_Run(void)
+@@ -4456,6 +4461,9 @@ int UI_Initialise(int *argc, char *argv[])
+ void UI_Run(void)
+ {
+ 	static UI_tMenuItem menu_array[] = {
++#ifdef KMS
++		UI_MENU_ACTION_ACCEL(UI_MENU_LIBRARY, "Library", "F9"),
++#endif
+ 		UI_MENU_FILESEL_ACCEL(UI_MENU_RUN, "Run Atari Program", "Alt+R"),
+ 		UI_MENU_SUBMENU_ACCEL(UI_MENU_DISK, "Disk Management", "Alt+D"),
+ 		UI_MENU_SUBMENU_ACCEL(UI_MENU_CARTRIDGE, "Cartridge Management", "Alt+C"),
+@@ -4496,15 +4504,27 @@ void UI_Run(void)
  		UI_MENU_ACTION(UI_MENU_MONITOR, "About Pocket Atari"),
  #elif defined(DREAMCAST)
  		UI_MENU_ACTION(UI_MENU_MONITOR, "About AtariDC"),
@@ -146,14 +159,36 @@ index 5b651bcf..12631227 100644
  #endif
  		UI_MENU_ACTION_ACCEL(UI_MENU_ABOUT, "About the Emulator", "Alt+A"),
 +#ifdef KMS
-+		UI_MENU_ACTION_ACCEL(UI_MENU_EXIT, "Shut down the laptop", "F9"),
++		UI_MENU_ACTION(UI_MENU_EXIT, "Shut down the laptop"),
 +#else
  		UI_MENU_ACTION_ACCEL(UI_MENU_EXIT, "Exit Emulator", "F9"),
 +#endif
  		UI_MENU_END
  	};
  
-@@ -4629,6 +4640,11 @@ void UI_Run(void)
++#ifdef KMS
++	int option = UI_MENU_LIBRARY;
++#else
+ 	int option = UI_MENU_RUN;
++#endif
+ 	int done = FALSE;
+ #if SUPPORTS_CHANGE_VIDEOMODE
+ 	VIDEOMODE_ForceStandardScreen(TRUE);
+@@ -4545,6 +4565,13 @@ void UI_Run(void)
+ 		case UI_MENU_CARTRIDGE:
+ 			CartManagement();
+ 			break;
++#ifdef KMS
++		case UI_MENU_LIBRARY:
++			if (KMS_LIBRARY_Run())
++				done = TRUE;	/* a program was started */
++			UI_is_active = TRUE; /* back in this menu */
++			break;
++#endif
+ 		case UI_MENU_RUN:
+ 			/* if (RunExe()) */
+ 			if (AutostartFile())
+@@ -4629,6 +4656,11 @@ void UI_Run(void)
  			AboutEmulator();
  			break;
  		case UI_MENU_MONITOR:
