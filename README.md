@@ -91,6 +91,13 @@ scripts/run-qemu.sh bios                         # or: uefi
 Write `build/atari-os.img` to a USB stick with `dd` (or any imaging tool).
 Secure Boot must be disabled on UEFI machines.
 
+**Ventoy:** copy `atari-os.img` onto a Ventoy stick as a file and pick it
+from the Ventoy menu (Legacy or UEFI). After the kernel starts, init looks
+for an `atari-os*.img` file on every partition (FAT, exFAT, NTFS),
+loop-mounts it and uses the FAT inside as the stick, so config and FujiNet
+files persist inside the image. `scripts/mk-ventoy-test.sh` builds a
+QEMU disk that exercises this path.
+
 Pick the *debug* entry in the boot menu to get a root shell on the serial
 console and verbose kernel messages.
 

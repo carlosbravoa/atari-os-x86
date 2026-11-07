@@ -44,6 +44,7 @@
 #include <linux/reboot.h>
 
 #define MEDIA        "/media"
+#define HOSTFS       "/.host"   /* partition holding atari-os*.img (Ventoy) */
 #define MEDIA_OS     MEDIA "/atari-os"
 #define MEDIA_USER   MEDIA "/atari"
 #define MODLOOP_IMG  MEDIA_OS "/modloop.sqfs"
@@ -255,8 +256,8 @@ static void walk_modalias(const char *dir, int depth)
 
 /* Modules nothing announces through a modalias. */
 static const char *const base_modules[] = {
-	"evdev", "loop", "squashfs", "vfat", "nls_cp437", "nls_iso8859-1", "nls_utf8",
-	"usb-storage", "uas", "sd_mod", "button", "af_packet", NULL
+	"evdev", "loop", "squashfs", "vfat", "exfat", "ntfs3", "nls_cp437", "nls_iso8859-1",
+	"nls_utf8", "usb-storage", "uas", "sd_mod", "button", "af_packet", NULL
 };
 
 static void coldplug(void)
@@ -269,6 +270,8 @@ static void coldplug(void)
 }
 
 /* ---- boot media -------------------------------------------------------- */
+
+static int try_image_file(const char *dev);
 
 static int try_mount_media(const char *dev)
 {
@@ -304,6 +307,22 @@ static int scan_block_devices(void)
 		found = try_mount_media(dev);
 	}
 	closedir(d);
+	if (found)
+		return 1;
+	/* Second pass: our image as a file on somebody else's partition. */
+	d = opendir("/sys/class/block");
+	if (!d)
+		return 0;
+	while (!found && (e = readdir(d)) != NULL) {
+		if (e->d_name[0] == '.' || strncmp(e->d_name, "loop", 4) == 0
+		    || strncmp(e->d_name, "ram", 3) == 0 || strncmp(e->d_name, "zram", 4) == 0)
+			continue;
+		snprintf(dev, sizeof dev, "/dev/%s", e->d_name);
+		if (!exists(dev))
+			continue;
+		found = try_image_file(dev);
+	}
+	closedir(d);
 	return found;
 }
 
@@ -326,7 +345,7 @@ static void find_media(void)
 	logmsg("no boot media found; continuing with the built-in system");
 }
 
-static int attach_loop(const char *image)
+static int attach_loop(const char *image, int partscan, int writable)
 {
 	int ctl, img, dev, num;
 	char path[32];
@@ -339,7 +358,7 @@ static int attach_loop(const char *image)
 	if (num < 0)
 		return -1;
 	snprintf(path, sizeof path, "/dev/loop%d", num);
-	img = open(image, O_RDONLY | O_CLOEXEC);
+	img = open(image, (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC);
 	if (img < 0)
 		return -1;
 	dev = open(path, O_RDWR | O_CLOEXEC);
@@ -352,15 +371,69 @@ static int attach_loop(const char *image)
 		close(img);
 		return -1;
 	}
+	if (partscan) {
+		struct loop_info64 info;
+		memset(&info, 0, sizeof info);
+		info.lo_flags = LO_FLAGS_PARTSCAN;
+		ioctl(dev, LOOP_SET_STATUS64, &info);
+	}
 	close(img);
 	close(dev);
 	return num;
 }
 
+/* Ventoy (or any stick with our image copied onto it as a file): the
+   kernel and initramfs were loaded by the firmware-side loader, but the
+   FAT inside the image is what we want as /media. Find the image file on
+   a mountable partition, loop-attach it, mount its first partition. */
+static int try_image_file(const char *dev)
+{
+	static const char *const fstypes[] = { "vfat", "exfat", "ntfs3", NULL };
+	int i, found = 0;
+
+	mkdir_p(HOSTFS, 0755);
+	for (i = 0; fstypes[i] && !found; i++) {
+		DIR *d;
+		struct dirent *e;
+		if (mount(dev, HOSTFS, fstypes[i], MS_NOATIME | MS_NODEV | MS_NOSUID, "") != 0)
+			continue;
+		d = opendir(HOSTFS);
+		while (d && !found && (e = readdir(d)) != NULL) {
+			char img[400], part[48];
+			size_t len = strlen(e->d_name);
+			int num, tries;
+			if (strncmp(e->d_name, "atari-os", 8) != 0 || len < 4
+			    || strcmp(e->d_name + len - 4, ".img") != 0)
+				continue;
+			snprintf(img, sizeof img, HOSTFS "/%s", e->d_name);
+			num = attach_loop(img, 1, 1);
+			if (num < 0)
+				continue;
+			snprintf(part, sizeof part, "/dev/loop%dp1", num);
+			for (tries = 0; tries < 20 && !exists(part); tries++)
+				sleep_ms(50);
+			if (mount(part, MEDIA, "vfat", MS_NOATIME | MS_NODEV | MS_NOSUID,
+			          "flush,shortname=mixed,errors=continue") == 0) {
+				if (exists(MODLOOP_IMG)) {
+					logmsg("using image file %s on %s (%s)", e->d_name, dev, fstypes[i]);
+					found = 1;
+				}
+				else
+					umount2(MEDIA, MNT_DETACH);
+			}
+		}
+		if (d)
+			closedir(d);
+		if (!found)
+			umount2(HOSTFS, MNT_DETACH);
+	}
+	return found;
+}
+
 static void mount_modloop(void)
 {
 	char dev[32];
-	int num = attach_loop(MODLOOP_IMG);
+	int num = attach_loop(MODLOOP_IMG, 0, 0);
 	if (num < 0) {
 		logmsg("modloop: cannot attach loop device: %s", strerror(errno));
 		return;
@@ -604,6 +677,7 @@ static void shutdown_machine(int how)
 	sync();
 	if (media_mounted)
 		umount2(MEDIA, 0);
+	umount2(HOSTFS, 0); /* image-file (Ventoy) case; harmless otherwise */
 	sync();
 	reboot(how);
 	for (;;)
@@ -709,6 +783,7 @@ int main(void)
 	sfd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
 
 	write_file("/proc/sys/kernel/printk", debug ? "7 4 1 7" : "3 3 1 3");
+	write_file("/proc/sys/kernel/modprobe", "/bin/modprobe");
 
 	if (debug)
 		start_debug_shell();

@@ -35,7 +35,7 @@ FIRMWARE_PKGS="linux-firmware-i915 linux-firmware-radeon linux-firmware-nvidia l
 # the keyboard before the modloop is available. Dependencies are resolved.
 INITRAMFS_MODULES="evdev usbhid hid-generic xhci-pci xhci-hcd ehci-pci ehci-hcd
 	ohci-pci ohci-hcd uhci-hcd usb-storage uas sd_mod ahci nvme mmc_block sdhci-pci
-	loop squashfs vfat nls_cp437 nls_iso8859-1 nls_utf8 exfat button
+	loop squashfs vfat nls_cp437 nls_iso8859-1 nls_utf8 exfat ntfs3 button
 	virtio_pci virtio_blk virtio_input virtio_scsi bochs af_packet"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
