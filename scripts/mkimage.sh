@@ -54,7 +54,8 @@ mkdir -p "$STAGE"
 apk add --root "$STAGE" --initdb --no-scripts --no-cache \
 	--keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories \
 	linux-lts musl busybox-static alsa-lib libdrm \
-	expat libcrypto3 zlib libstdc++ libgcc ca-certificates-bundle $FIRMWARE_PKGS >/dev/null
+	expat libcrypto3 zlib libstdc++ libgcc ca-certificates-bundle \
+	wpa_supplicant dropbear dropbear-convert $FIRMWARE_PKGS >/dev/null
 fi
 KVER=$(ls "$STAGE/lib/modules")
 [ -n "$KVER" ] || die "no kernel modules in stage"
@@ -81,6 +82,20 @@ rm -rf "$INITRAMFS/usr/share/alsa/ucm2" "$INITRAMFS/usr/share/alsa/topology"
 # busybox applets as symlinks: used by init (modprobe) and the debug shell
 for a in $("$STAGE/bin/busybox.static" --list); do ln -sf busybox "$INITRAMFS/bin/$a"; done
 
+# Shared libraries: resolve NEEDED entries from the stage recursively.
+copy_deps() {
+	for bin in "$@"; do
+		readelf -d "$bin" 2>/dev/null | awk '/NEEDED/ {gsub(/[][]/,"",$5); print $5}' | while read -r lib; do
+			[ -e "$INITRAMFS/usr/lib/$lib" ] || [ -e "$INITRAMFS/lib/$lib" ] && continue
+			src=""
+			for d in "$STAGE/usr/lib" "$STAGE/lib"; do [ -e "$d/$lib" ] && src="$d/$lib" && break; done
+			[ -n "$src" ] || { echo "warning: $lib for $bin not found in stage" >&2; continue; }
+			cp "$src" "$INITRAMFS/usr/lib/$lib"
+			copy_deps "$src"
+		done
+	done
+}
+
 # FujiNet-PC: binary, web UI data, default config; plus its shared libraries.
 if [ -x "$BUILD/fujinet/dist/fujinet" ]; then
 	mkdir -p "$INITRAMFS/usr/lib/fujinet" "$INITRAMFS/etc/ssl/certs"
@@ -88,9 +103,7 @@ if [ -x "$BUILD/fujinet/dist/fujinet" ]; then
 	strip "$INITRAMFS/usr/lib/fujinet/fujinet"
 	cp -r "$BUILD/fujinet/dist/data" "$INITRAMFS/usr/lib/fujinet/"
 	cp "$BUILD/fujinet/dist/fnconfig.ini" "$INITRAMFS/usr/lib/fujinet/"
-	for lib in libexpat.so.1 libcrypto.so.3 libz.so.1 libstdc++.so.6 libgcc_s.so.1; do
-		cp "$STAGE/usr/lib/$lib" "$INITRAMFS/usr/lib/"
-	done
+	copy_deps "$INITRAMFS/usr/lib/fujinet/fujinet"
 	cp "$STAGE/etc/ssl/certs/ca-certificates.crt" "$INITRAMFS/etc/ssl/certs/"
 	ln -sf certs/ca-certificates.crt "$INITRAMFS/etc/ssl/cert.pem"
 	log "FujiNet-PC included"
@@ -119,8 +132,27 @@ esac
 exit 0
 EOS
 chmod +x "$INITRAMFS/etc/udhcpc.script"
+# Never bind the PC-speaker sound driver; it would show up as a sound card.
+mkdir -p "$INITRAMFS/etc/modprobe.d"
+printf 'blacklist snd_pcsp\nblacklist pcspkr\n' > "$INITRAMFS/etc/modprobe.d/blacklist.conf"
 echo "atari" > "$INITRAMFS/etc/hostname"
 printf '127.0.0.1 localhost atari\n' > "$INITRAMFS/etc/hosts"
+
+copy_deps "$INITRAMFS/usr/bin/atari800"
+
+# Wi-Fi and SSH userspace (driven by init and the F8 System menu).
+mkdir -p "$INITRAMFS/sbin" "$INITRAMFS/usr/sbin" "$INITRAMFS/root/.ssh" "$INITRAMFS/etc/dropbear"
+cp "$STAGE/sbin/wpa_supplicant" "$STAGE/sbin/wpa_cli" "$INITRAMFS/sbin/"
+cp "$STAGE/usr/sbin/dropbear" "$INITRAMFS/usr/sbin/"
+cp "$STAGE/usr/bin/dropbearkey" "$STAGE/usr/bin/dropbearconvert" "$INITRAMFS/usr/bin/"
+copy_deps "$INITRAMFS/sbin/wpa_supplicant" "$INITRAMFS/sbin/wpa_cli" "$INITRAMFS/usr/sbin/dropbear" \
+	"$INITRAMFS/usr/bin/dropbearkey" "$INITRAMFS/usr/bin/dropbearconvert"
+# dropbear needs an account database for root
+printf 'root:x:0:0:root:/root:/bin/sh\n' > "$INITRAMFS/etc/passwd"
+printf 'root:x:0:\n' > "$INITRAMFS/etc/group"
+printf 'root:!::0:::::\n' > "$INITRAMFS/etc/shadow"
+chmod 600 "$INITRAMFS/etc/shadow"
+printf 'export PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport HOME=/root\n' > "$INITRAMFS/etc/profile"
 
 # Module subset with dependencies, from modules.dep.
 MODDIR="$STAGE/lib/modules/$KVER"

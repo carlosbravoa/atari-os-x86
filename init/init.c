@@ -22,6 +22,7 @@
  */
 
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -37,6 +38,8 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <linux/input.h>
@@ -54,6 +57,9 @@
 #define FUJINET_DIR  "/usr/lib/fujinet"      /* binary + data/ (web UI, autorun) */
 #define FUJINET_BIN  FUJINET_DIR "/fujinet"
 #define UDHCPC_SCRIPT "/etc/udhcpc.script"
+#define CTL_SOCK     "/run/atari.ctl"       /* System menu <-> init */
+#define WPA_CTRL_DIR "/run/wpa"
+#define SYSCONF      MEDIA_USER "/config/system.conf"
 #define MEDIA_WAIT_S 15
 
 static int debug = 0;
@@ -65,8 +71,18 @@ static int media_mounted = 0;
 static pid_t emu_pid = -1;
 static pid_t shell_pid = -1;
 static pid_t fuji_pid = -1;
+static pid_t ssh_pid = -1;
 static int emu_restarts = 0;
-static int fujinet_enabled = 0;
+static int emu_restart_requested = 0;
+static int fujinet_enabled = 0;   /* FujiNet-PC process available */
+static int ctl_fd = -1;
+static char wifi_iface[32] = "";
+
+/* Persisted settings (system.conf on the stick). */
+static struct {
+	int fujinet_boot; /* emulator boots through FujiNet (-netsio) */
+	int ssh;          /* dropbear running */
+} conf = { 0, 0 };
 
 /* ---- logging --------------------------------------------------------- */
 
@@ -168,6 +184,69 @@ static int run(char *const argv[])
 	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
 		;
 	return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* Run a program, capture its stdout (truncated to size-1). */
+static int run_output(char *const argv[], char *buf, size_t size)
+{
+	int fds[2];
+	pid_t pid;
+	int status;
+	size_t used = 0;
+
+	buf[0] = '\0';
+	if (pipe(fds) < 0)
+		return -1;
+	pid = fork();
+	if (pid < 0)
+		return -1;
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR);
+		dup2(fds[1], 1);
+		if (null >= 0) {
+			dup2(null, 0);
+			dup2(null, 2);
+		}
+		close(fds[0]);
+		close(fds[1]);
+		execv(argv[0], argv);
+		_exit(127);
+	}
+	close(fds[1]);
+	for (;;) {
+		ssize_t n = read(fds[0], buf + used, size - 1 - used);
+		if (n <= 0)
+			break;
+		used += (size_t)n;
+		if (used >= size - 1)
+			break;
+	}
+	buf[used] = '\0';
+	close(fds[0]);
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+	return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static void load_sysconf(void)
+{
+	char buf[256];
+	if (read_file(SYSCONF, buf, sizeof buf) < 0)
+		return;
+	conf.fujinet_boot = strstr(buf, "fujinet=1") != NULL;
+	conf.ssh = strstr(buf, "ssh=1") != NULL;
+}
+
+static void save_sysconf(void)
+{
+	FILE *f;
+	if (!media_mounted)
+		return;
+	f = fopen(SYSCONF, "w");
+	if (!f)
+		return;
+	fprintf(f, "fujinet=%d\nssh=%d\n", conf.fujinet_boot, conf.ssh);
+	fclose(f);
 }
 
 static void sleep_ms(int ms)
@@ -486,10 +565,32 @@ static void start_network(void)
 		if (e->d_name[0] == '.' || strcmp(e->d_name, "lo") == 0)
 			continue;
 		snprintf(wireless, sizeof wireless, "/sys/class/net/%s/wireless", e->d_name);
-		if (exists(wireless))
-			continue; /* needs association first; later phase */
 		up[4] = e->d_name;
 		run(up);
+		if (exists(wireless)) {
+			/* wpa_supplicant with its config on the stick; the System menu
+			   drives it through wpa_cli. DHCP keeps retrying until a link. */
+			char *wpaconf = (char *)(media_mounted ? MEDIA_USER "/config/wpa_supplicant.conf"
+			                                        : "/run/wpa_supplicant.conf");
+			char *wpa[] = { "/sbin/wpa_supplicant", "-B", "-i", e->d_name, "-c", wpaconf, NULL };
+			if (wifi_iface[0] || !exists("/sbin/wpa_supplicant"))
+				continue;
+			if (!exists(wpaconf)) {
+				FILE *f = fopen(wpaconf, "w");
+				if (f) {
+					fputs("ctrl_interface=" WPA_CTRL_DIR "\nupdate_config=1\n", f);
+					fclose(f);
+				}
+			}
+			mkdir_p(WPA_CTRL_DIR, 0755);
+			snprintf(wifi_iface, sizeof wifi_iface, "%.31s", e->d_name);
+			run(wpa);
+			dhcp_retry[3] = e->d_name;
+			(void)dhcp;
+			run(dhcp_retry);
+			logmsg("wifi: wpa_supplicant and dhcp started on %s", e->d_name);
+			continue;
+		}
 		dhcp_retry[3] = e->d_name;
 		(void)dhcp;
 		/* -b: background on failure and keep trying, so a cable plugged in
@@ -541,6 +642,108 @@ static void start_fujinet(void)
 	logmsg("fujinet started, pid %d, config %s", (int)fuji_pid, cfg);
 }
 
+/* ---- SSH (dropbear) ---------------------------------------------------- */
+
+/* Keys live on the stick: a host key so clients don't see a new identity
+   every boot, and a client key pair generated on first use whose private
+   half is written to the stick in OpenSSH format. Holding the stick means
+   you may log in; that is the device's trust model. */
+static int ssh_prepare(void)
+{
+	const char *dir = media_mounted ? MEDIA_USER "/ssh" : "/run/ssh";
+	char host[320], db[320], priv[320], pub[320], auth[320], pubkey[600];
+	FILE *f;
+
+	mkdir_p(dir, 0700);
+	snprintf(host, sizeof host, "%s/host_ed25519", dir);
+	snprintf(db, sizeof db, "%s/client_ed25519.dropbear", dir);
+	snprintf(priv, sizeof priv, "%s/id_ed25519", dir);
+	snprintf(pub, sizeof pub, "%s/id_ed25519.pub", dir);
+	snprintf(auth, sizeof auth, "%s/authorized_keys", dir);
+
+	if (!exists(host)) {
+		char *gen[] = { "/usr/bin/dropbearkey", "-t", "ed25519", "-f", host, NULL };
+		if (run(gen) != 0)
+			return 0;
+	}
+	if (!exists(auth)) {
+		char *gen[] = { "/usr/bin/dropbearkey", "-t", "ed25519", "-f", db, NULL };
+		char *conv[] = { "/usr/bin/dropbearconvert", "dropbear", "openssh", db, priv, NULL };
+		char *show[] = { "/usr/bin/dropbearkey", "-y", "-f", db, NULL };
+		char *p;
+		if (run(gen) != 0 || run(conv) != 0 || run_output(show, pubkey, sizeof pubkey) != 0)
+			return 0;
+		p = strstr(pubkey, "ssh-ed25519 ");
+		if (!p)
+			return 0;
+		{
+			char *nl = strchr(p, '\n');
+			if (nl)
+				nl[1] = '\0';
+		}
+		f = fopen(auth, "w");
+		if (!f)
+			return 0;
+		fputs(p, f);
+		fclose(f);
+		f = fopen(pub, "w");
+		if (f) {
+			fputs(p, f);
+			fclose(f);
+		}
+		unlink(db);
+	}
+	mkdir_p("/root/.ssh", 0700);
+	chmod("/root", 0700);      /* dropbear refuses keys under group-writable dirs */
+	chmod("/root/.ssh", 0700);
+	{
+		char *cp[] = { BUSYBOX, "cp", auth, "/root/.ssh/authorized_keys", NULL };
+		run(cp);
+		chmod("/root/.ssh/authorized_keys", 0600);
+	}
+	return 1;
+}
+
+static void ssh_start(void)
+{
+	const char *dir = media_mounted ? MEDIA_USER "/ssh" : "/run/ssh";
+	char host[320];
+	if (ssh_pid > 0 || !exists("/usr/sbin/dropbear"))
+		return;
+	if (!ssh_prepare()) {
+		logmsg("ssh: key setup failed");
+		return;
+	}
+	snprintf(host, sizeof host, "%s/host_ed25519", dir);
+	ssh_pid = fork();
+	if (ssh_pid == 0) {
+		int null = open("/dev/null", O_RDWR);
+		sigset_t none;
+		sigemptyset(&none);
+		sigprocmask(SIG_SETMASK, &none, NULL);
+		if (null >= 0) {
+			dup2(null, 0);
+			dup2(null, 1);
+			dup2(null, 2);
+		}
+		setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
+		/* -F foreground, -s no password logins, -r host key */
+		execl("/usr/sbin/dropbear", "dropbear", "-F", "-s", "-r", host, (char *)NULL);
+		_exit(127);
+	}
+	logmsg("ssh: dropbear started, pid %d", (int)ssh_pid);
+}
+
+static void ssh_stop(void)
+{
+	if (ssh_pid <= 0)
+		return;
+	kill(ssh_pid, SIGTERM);
+	waitpid(ssh_pid, NULL, 0);
+	ssh_pid = -1;
+	logmsg("ssh: stopped");
+}
+
 /* ---- emulator ---------------------------------------------------------- */
 
 static void start_emulator(void)
@@ -574,7 +777,7 @@ static void start_emulator(void)
 		argv[n++] = "-evdev-debug";
 		argv[n++] = "-kms-debug";
 	}
-	if (fujinet_enabled)
+	if (fujinet_enabled && conf.fujinet_boot)
 		argv[n++] = "-netsio"; /* the emulator is the NetSIO hub FujiNet-PC connects to */
 	/* Extra options, one per line, from the stick. */
 	{
@@ -649,6 +852,263 @@ static void start_debug_shell(void)
 		execl(BUSYBOX, "sh", "-l", (char *)NULL);
 		_exit(1);
 	}
+}
+
+/* ---- control socket ------------------------------------------------------- */
+
+static void shutdown_machine(int how);
+
+static void ctl_open(void)
+{
+	struct sockaddr_un addr;
+	ctl_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (ctl_fd < 0)
+		return;
+	memset(&addr, 0, sizeof addr);
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, CTL_SOCK, sizeof addr.sun_path - 1);
+	unlink(CTL_SOCK);
+	if (bind(ctl_fd, (struct sockaddr *)&addr, sizeof addr) < 0 || listen(ctl_fd, 4) < 0) {
+		close(ctl_fd);
+		ctl_fd = -1;
+		return;
+	}
+	chmod(CTL_SOCK, 0600);
+}
+
+static void reply(int fd, const char *s)
+{
+	if (write(fd, s, strlen(s)) < 0) { /* client gone */ }
+}
+
+static void wpa(const char *a1, const char *a2, const char *a3, char *out, size_t size)
+{
+	char *argv[] = { "/sbin/wpa_cli", "-p", WPA_CTRL_DIR, "-i", wifi_iface,
+	                 (char *)a1, (char *)a2, (char *)a3, NULL };
+	int n = 5;
+	if (!a1) argv[n] = NULL;
+	else if (!a2) argv[n + 1] = NULL;
+	else if (!a3) argv[n + 2] = NULL;
+	run_output(argv, out, size);
+}
+
+static void cmd_status(int fd)
+{
+	char buf[2048], line[300], val[128];
+	char *p;
+
+	snprintf(line, sizeof line, "fujinet %s\nssh %s\n",
+	         fujinet_enabled && conf.fujinet_boot ? "on" : "off", ssh_pid > 0 ? "on" : "off");
+	reply(fd, line);
+
+	/* first non-loopback IPv4 address */
+	{
+		char *ip[] = { BUSYBOX, "ip", "-4", "-o", "addr", "show", "scope", "global", NULL };
+		run_output(ip, buf, sizeof buf);
+		p = strstr(buf, "inet ");
+		if (p && sscanf(p + 5, "%127s", val) == 1) {
+			char *slash = strchr(val, '/');
+			if (slash)
+				*slash = '\0';
+			snprintf(line, sizeof line, "ip %s\n", val);
+			reply(fd, line);
+		}
+	}
+	if (wifi_iface[0]) {
+		char state[64] = "?", ssid[128] = "";
+		wpa("status", NULL, NULL, buf, sizeof buf);
+		p = strstr(buf, "wpa_state=");
+		if (p)
+			sscanf(p + 10, "%63s", state);
+		p = strstr(buf, "\nssid=");
+		if (p)
+			sscanf(p + 6, "%127[^\n]", ssid);
+		if (strcmp(state, "COMPLETED") == 0)
+			snprintf(line, sizeof line, "wifi connected %s\n", ssid);
+		else if (ssid[0])
+			snprintf(line, sizeof line, "wifi %s %s\n", state, ssid);
+		else
+			snprintf(line, sizeof line, "wifi not connected\n");
+		reply(fd, line);
+	}
+	{
+		DIR *d = opendir("/sys/class/power_supply");
+		struct dirent *e;
+		while (d && (e = readdir(d)) != NULL) {
+			char path[300];
+			if (strncmp(e->d_name, "BAT", 3) != 0)
+				continue;
+			snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity", e->d_name);
+			if (read_file(path, val, sizeof val) > 0) {
+				snprintf(line, sizeof line, "battery %s\n", val);
+				reply(fd, line);
+				break;
+			}
+		}
+		if (d)
+			closedir(d);
+	}
+	reply(fd, "OK\n");
+}
+
+static void cmd_wifi_results(int fd)
+{
+	char buf[8192], line[400];
+	char *p;
+	if (!wifi_iface[0]) {
+		reply(fd, "ERR no wifi adapter\n");
+		return;
+	}
+	wpa("scan_results", NULL, NULL, buf, sizeof buf);
+	/* bssid / frequency / signal level / flags / ssid */
+	p = strchr(buf, '\n');
+	while (p && *++p) {
+		char bssid[32], flags[200], ssid[200];
+		int freq, sig;
+		char *nl = strchr(p, '\n');
+		if (nl)
+			*nl = '\0';
+		if (sscanf(p, "%31s %d %d %199s %199[^\n]", bssid, &freq, &sig, flags, ssid) == 5 && ssid[0] != '\0') {
+			const char *kind = strstr(flags, "WPA") ? "wpa" : strstr(flags, "WEP") ? "wep" : "open";
+			snprintf(line, sizeof line, "net %d %s %s\n", sig, kind, ssid);
+			reply(fd, line);
+		}
+		p = nl;
+	}
+	reply(fd, "OK\n");
+}
+
+/* "wifi connect\t<ssid>\t<psk>" */
+static void cmd_wifi_connect(int fd, char *args)
+{
+	char *ssid = args, *psk, buf[512], id[16], q[1100];
+	if (!wifi_iface[0]) {
+		reply(fd, "ERR no wifi adapter\n");
+		return;
+	}
+	psk = strchr(ssid, '\t');
+	if (!psk) {
+		reply(fd, "ERR usage\n");
+		return;
+	}
+	*psk++ = '\0';
+	wpa("remove_network", "all", NULL, buf, sizeof buf);
+	wpa("add_network", NULL, NULL, buf, sizeof buf);
+	if (sscanf(buf, "%15s", id) != 1 || !isdigit((unsigned char)id[0])) {
+		reply(fd, "ERR wpa_supplicant not responding\n");
+		return;
+	}
+	snprintf(q, sizeof q, "\"%s\"", ssid);
+	wpa("set_network", id, NULL, buf, sizeof buf); /* no-op, keeps argv shape */
+	{
+		char *argv[] = { "/sbin/wpa_cli", "-p", WPA_CTRL_DIR, "-i", wifi_iface, "set_network", id, "ssid", q, NULL };
+		run_output(argv, buf, sizeof buf);
+	}
+	if (psk[0]) {
+		char pq[1100];
+		snprintf(pq, sizeof pq, "\"%s\"", psk);
+		char *argv[] = { "/sbin/wpa_cli", "-p", WPA_CTRL_DIR, "-i", wifi_iface, "set_network", id, "psk", pq, NULL };
+		run_output(argv, buf, sizeof buf);
+	}
+	else {
+		char *argv[] = { "/sbin/wpa_cli", "-p", WPA_CTRL_DIR, "-i", wifi_iface, "set_network", id, "key_mgmt", "NONE", NULL };
+		run_output(argv, buf, sizeof buf);
+	}
+	wpa("enable_network", id, NULL, buf, sizeof buf);
+	wpa("select_network", id, NULL, buf, sizeof buf);
+	wpa("save_config", NULL, NULL, buf, sizeof buf);
+	logmsg("wifi: connecting to \"%s\"", ssid);
+	reply(fd, "OK\n");
+}
+
+static void save_logs(void);
+
+static void ctl_handle(int fd)
+{
+	char line[1024];
+	ssize_t n;
+	struct timeval tv = { 2, 0 };
+	char buf[512];
+
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+	n = read(fd, line, sizeof line - 1);
+	if (n <= 0)
+		return;
+	line[n] = '\0';
+	{
+		char *nl = strchr(line, '\n');
+		if (nl)
+			*nl = '\0';
+	}
+	logmsg("ctl: %s", strncmp(line, "wifi connect", 12) == 0 ? "wifi connect" : line);
+
+	if (strcmp(line, "status") == 0)
+		cmd_status(fd);
+	else if (strcmp(line, "fujinet on") == 0 || strcmp(line, "fujinet off") == 0) {
+		if (!fujinet_enabled) {
+			reply(fd, "ERR FujiNet not installed\n");
+			return;
+		}
+		conf.fujinet_boot = strcmp(line, "fujinet on") == 0;
+		save_sysconf();
+		reply(fd, "OK\n");
+		emu_restart_requested = 1;
+		if (emu_pid > 0)
+			kill(emu_pid, SIGTERM);
+	}
+	else if (strcmp(line, "ssh on") == 0) {
+		ssh_start();
+		conf.ssh = ssh_pid > 0;
+		save_sysconf();
+		reply(fd, ssh_pid > 0 ? "OK\n" : "ERR could not start dropbear\n");
+	}
+	else if (strcmp(line, "ssh off") == 0) {
+		ssh_stop();
+		conf.ssh = 0;
+		save_sysconf();
+		reply(fd, "OK\n");
+	}
+	else if (strcmp(line, "wifi scan") == 0) {
+		if (!wifi_iface[0]) {
+			reply(fd, "ERR no wifi adapter\n");
+			return;
+		}
+		wpa("scan", NULL, NULL, buf, sizeof buf);
+		reply(fd, "OK\n");
+	}
+	else if (strcmp(line, "wifi results") == 0)
+		cmd_wifi_results(fd);
+	else if (strncmp(line, "wifi connect\t", 13) == 0)
+		cmd_wifi_connect(fd, line + 13);
+	else if (strcmp(line, "wifi forget") == 0) {
+		if (wifi_iface[0]) {
+			wpa("remove_network", "all", NULL, buf, sizeof buf);
+			wpa("save_config", NULL, NULL, buf, sizeof buf);
+		}
+		reply(fd, "OK\n");
+	}
+	else if (strcmp(line, "logs") == 0) {
+		save_logs();
+		reply(fd, "OK\n");
+	}
+	else if (strcmp(line, "restart-emulator") == 0) {
+		reply(fd, "OK\n");
+		emu_restart_requested = 1;
+		if (emu_pid > 0)
+			kill(emu_pid, SIGTERM);
+	}
+	else if (strcmp(line, "reboot") == 0) {
+		reply(fd, "OK\n");
+		close(fd);
+		shutdown_machine(LINUX_REBOOT_CMD_RESTART);
+	}
+	else if (strcmp(line, "poweroff") == 0) {
+		reply(fd, "OK\n");
+		close(fd);
+		shutdown_machine(LINUX_REBOOT_CMD_POWER_OFF);
+	}
+	else
+		reply(fd, "ERR unknown command\n");
 }
 
 /* ---- logs on the stick ---------------------------------------------------- */
@@ -777,7 +1237,7 @@ int main(void)
 {
 	sigset_t mask;
 	int sfd;
-	struct pollfd pfds[MAX_BUTTONS + 1];
+	struct pollfd pfds[MAX_BUTTONS + 2];
 
 	mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
 	mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
@@ -816,11 +1276,14 @@ int main(void)
 	coldplug();
 	open_buttons();
 
+	load_sysconf();
+	ctl_open();
+	start_network();
 	fujinet_enabled = !nofujinet && exists(FUJINET_BIN);
-	if (fujinet_enabled) {
-		start_network();
+	if (fujinet_enabled)
 		start_fujinet();
-	}
+	if (conf.ssh)
+		ssh_start();
 
 	if (emudelay > 0) {
 		logmsg("waiting %d s before starting the emulator", emudelay);
@@ -831,10 +1294,16 @@ int main(void)
 
 	for (;;) {
 		static int logs_saved = 0;
-		int i, n = 0, r;
+		int i, n = 0, r, ctl_slot = -1;
 		pfds[n].fd = sfd;
 		pfds[n].events = POLLIN;
 		n++;
+		if (ctl_fd >= 0) {
+			ctl_slot = n;
+			pfds[n].fd = ctl_fd;
+			pfds[n].events = POLLIN;
+			n++;
+		}
 		for (i = 0; i < button_count; i++) {
 			pfds[n].fd = button_fds[i];
 			pfds[n].events = POLLIN;
@@ -857,6 +1326,12 @@ int main(void)
 					while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
 						if (pid == emu_pid) {
 							emu_pid = -1;
+							if (emu_restart_requested) {
+								emu_restart_requested = 0;
+								logmsg("restarting emulator (fujinet boot %s)", conf.fujinet_boot ? "on" : "off");
+								start_emulator();
+								continue;
+							}
 							if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && !debug) {
 								logmsg("emulator exited normally");
 								shutdown_machine(LINUX_REBOOT_CMD_POWER_OFF);
@@ -872,6 +1347,10 @@ int main(void)
 						else if (pid == shell_pid) {
 							shell_pid = -1;
 							start_debug_shell();
+						}
+						else if (pid == ssh_pid) {
+							ssh_pid = -1;
+							logmsg("ssh: dropbear exited");
 						}
 						else if (pid == fuji_pid) {
 							fuji_pid = -1;
@@ -894,8 +1373,15 @@ int main(void)
 					shutdown_machine(LINUX_REBOOT_CMD_RESTART);
 			}
 		}
+		if (ctl_slot >= 0 && (pfds[ctl_slot].revents & POLLIN)) {
+			int c = accept(ctl_fd, NULL, NULL);
+			if (c >= 0) {
+				ctl_handle(c);
+				close(c);
+			}
+		}
 		for (i = 1; i < n; i++)
-			if (pfds[i].revents & POLLIN)
+			if (i != ctl_slot && (pfds[i].revents & POLLIN))
 				read_button(pfds[i].fd);
 	}
 }

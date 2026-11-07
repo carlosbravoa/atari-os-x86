@@ -28,6 +28,7 @@
 #include "log.h"
 #include "platform.h"
 #include "sound.h"
+#include "kms/kms_sysmenu.h"
 
 static snd_pcm_t *pcm = NULL;
 static unsigned int frame_bytes = 0;
@@ -54,6 +55,10 @@ static int pick_card(void)
 		snd_ctl_card_info_alloca(&info);
 		snd_ctl_card_info(ctl, info);
 		cname = snd_ctl_card_info_get_name(info);
+		if (strcmp(snd_ctl_card_info_get_id(info), "pcsp") == 0) {
+			snd_ctl_close(ctl); /* the PC speaker driver is not a sound card */
+			continue;
+		}
 		while (snd_ctl_pcm_next_device(ctl, &dev) == 0 && dev >= 0) {
 			snd_pcm_info_t *pi;
 			snd_pcm_info_alloca(&pi);
@@ -192,6 +197,73 @@ static void unmute_mixer(void)
 	}
 	snd_mixer_close(mixer);
 	Log_print("alsa: mixer: %d playback switches enabled", unmuted);
+}
+
+/* Master volume for the System menu: the first playback element with a
+   volume, preferring "Master" then "PCM"/"Speaker". */
+static snd_mixer_elem_t *volume_elem(snd_mixer_t **mixer_out)
+{
+	static const char *const prefer[] = { "Master", "PCM", "Speaker", "Headphone", NULL };
+	snd_mixer_t *mixer;
+	snd_mixer_elem_t *elem, *first = NULL;
+	int i;
+
+	if (snd_mixer_open(&mixer, 0) < 0)
+		return NULL;
+	if ((snd_mixer_attach(mixer, ctl_name) < 0 && snd_mixer_attach(mixer, "default") < 0)
+	    || snd_mixer_selem_register(mixer, NULL, NULL) < 0 || snd_mixer_load(mixer) < 0) {
+		snd_mixer_close(mixer);
+		return NULL;
+	}
+	for (i = 0; prefer[i]; i++) {
+		for (elem = snd_mixer_first_elem(mixer); elem; elem = snd_mixer_elem_next(elem)) {
+			if (!snd_mixer_selem_has_playback_volume(elem))
+				continue;
+			if (!first)
+				first = elem;
+			if (strcmp(snd_mixer_selem_get_name(elem), prefer[i]) == 0) {
+				*mixer_out = mixer;
+				return elem;
+			}
+		}
+	}
+	if (first) {
+		*mixer_out = mixer;
+		return first;
+	}
+	snd_mixer_close(mixer);
+	return NULL;
+}
+
+int ALSA_GetVolume(void)
+{
+	snd_mixer_t *mixer;
+	snd_mixer_elem_t *elem = volume_elem(&mixer);
+	long min, max, cur;
+	int pct = -1;
+	if (!elem)
+		return -1;
+	if (snd_mixer_selem_get_playback_volume_range(elem, &min, &max) == 0 && max > min
+	    && snd_mixer_selem_get_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT, &cur) == 0)
+		pct = (int)((cur - min) * 100 / (max - min));
+	snd_mixer_close(mixer);
+	return pct;
+}
+
+void ALSA_SetVolume(int percent)
+{
+	snd_mixer_t *mixer;
+	snd_mixer_elem_t *elem = volume_elem(&mixer);
+	long min, max;
+	if (!elem)
+		return;
+	if (percent < 0) percent = 0;
+	if (percent > 100) percent = 100;
+	if (snd_mixer_selem_get_playback_volume_range(elem, &min, &max) == 0 && max > min)
+		snd_mixer_selem_set_playback_volume_all(elem, min + (max - min) * percent / 100);
+	if (snd_mixer_selem_has_playback_switch(elem))
+		snd_mixer_selem_set_playback_switch_all(elem, percent > 0);
+	snd_mixer_close(mixer);
 }
 
 int PLATFORM_SoundSetup(Sound_setup_t *setup)

@@ -29,6 +29,7 @@
 #include "sound.h"
 #endif
 #include "kms/kms_input.h"
+#include "kms/kms_sysmenu.h"
 #include "kms/kms_video.h"
 
 static volatile sig_atomic_t quit_requested = 0;
@@ -52,13 +53,15 @@ void PLATFORM_ConfigInit(void)
 int PLATFORM_Configure(char *option, char *parameters)
 {
 	return KMS_VIDEO_ReadConfig(option, parameters) ||
-	       KMS_INPUT_ReadConfig(option, parameters);
+	       KMS_INPUT_ReadConfig(option, parameters) ||
+	       KMS_SYSMENU_ReadConfig(option, parameters);
 }
 
 void PLATFORM_ConfigSave(FILE *fp)
 {
 	KMS_VIDEO_WriteConfig(fp);
 	KMS_INPUT_WriteConfig(fp);
+	KMS_SYSMENU_WriteConfig(fp);
 }
 
 int PLATFORM_Initialise(int *argc, char *argv[])
@@ -79,6 +82,7 @@ int PLATFORM_Initialise(int *argc, char *argv[])
 #endif
 	if (!KMS_INPUT_Initialise(argc, argv))
 		return FALSE;
+	KMS_SYSMENU_ApplySettings();
 	return TRUE;
 }
 
@@ -127,6 +131,17 @@ int main(int argc, char **argv)
 
 	for (;;) {
 		INPUT_key_code = PLATFORM_Keyboard();
+		if (KMS_SYSMENU_requested) {
+			KMS_SYSMENU_requested = FALSE;
+#ifdef SOUND
+			Sound_Pause();
+#endif
+			KMS_SYSMENU_Run();
+#ifdef SOUND
+			Sound_Continue();
+#endif
+			INPUT_key_code = AKEY_NONE;
+		}
 		Atari800_Frame();
 		if (Atari800_display_screen)
 			PLATFORM_DisplayScreen();

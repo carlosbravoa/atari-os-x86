@@ -60,7 +60,7 @@ start)
 		-drive if=none,id=stick,format=raw,file="$IMG" \
 		-device usb-storage,bus=xhci.0,drive=stick,removable=on \
 		-device usb-kbd -vga std \
-		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8000-:8000 -device e1000e,netdev=n0 \
+		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8000-:8000,hostfwd=tcp:127.0.0.1:2222-:22 -device e1000e,netdev=n0 \
 		-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
 		-chardev socket,id=ser,path="$D/serial.sock",server=on,wait=off,logfile="$D/serial.log" \
 		-serial chardev:ser \

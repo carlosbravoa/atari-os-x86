@@ -44,14 +44,39 @@ core is the planned second core.
 Drop `.ATR` disk images in `disks/`, cartridges in `carts/`, and (optionally)
 real Atari ROMs in `roms/`. Without ROMs the built-in Altirra OS is used.
 
+## The System menu (F8)
+
+The laptop boots straight to BASIC `READY`. F8 opens a menu in the same
+style as the emulator's own, backed by PID 1 over a Unix socket:
+
+- **FujiNet boot** on/off: restarts the Atari into FujiNet CONFIG (persists)
+- **Volume** and **Brightness** sliders (persist in the emulator config)
+- **Wi-Fi**: scan, pick a network, type the password; `wpa_supplicant`
+  keeps the network in `atari/config/wpa_supplicant.conf`
+- **Remote access (SSH)** on/off, plus IP address and battery
+- Save logs to the stick, restart emulator, reboot, shut down
+
+### Remote access
+
+SSH is dropbear, root, keys only, off by default. On first use init
+generates a key pair and writes the private key to the stick:
+`atari/ssh/id_ed25519`. Whoever holds the stick may log in, which is the
+device's trust model. From another machine:
+
+```sh
+ssh -i /media/$USER/ATARI/atari/ssh/id_ed25519 root@<ip shown in the menu>
+```
+
+Settings live in `atari/config/system.conf` (`fujinet=`, `ssh=`).
+
 ## FujiNet
 
 [FujiNet-PC](https://github.com/FujiNetWIFI/fujinet-firmware) runs next to
-the emulator, connected over NetSIO, so the Atari boots into FujiNet CONFIG
-with the usual TNFS hosts, and `fujinet/SD/` on the stick is its SD card.
-Wired Ethernet gets an address by DHCP; Wi-Fi is the next phase. FujiNet's
-web UI is reachable on the LAN at `http://<laptop>:8000/`. Boot with
-`atari.nofujinet=1` for a plain Atari.
+the emulator, connected over NetSIO. With FujiNet boot on, the Atari boots
+into FujiNet CONFIG with the usual TNFS hosts, and `fujinet/SD/` on the
+stick is its SD card. Wired Ethernet gets an address by DHCP; Wi-Fi is set
+up from the System menu. FujiNet's web UI is reachable on the LAN at
+`http://<laptop>:8000/`. Boot with `atari.nofujinet=1` to not start it.
 
 FujiNet-PC is built from source for musl with two small patches
 (`fujinet/patches/`) and with `DEBUG_NO_REBOOT`, so it survives the Atari's
@@ -65,6 +90,7 @@ cold resets instead of restarting itself.
 | F2 / F3 / F4 | OPTION / SELECT / START |
 | F5, Shift+F5 | warm / cold reset |
 | F6, F7 | HELP, BREAK |
+| F8 | System menu (FujiNet, volume, brightness, Wi-Fi, SSH, power) |
 | F9 | quit (powers the laptop off) |
 | F10 | screenshot (PCX, saved next to the config) |
 | F11 | toggle arrow keys between cursor keys (default) and joystick 0 |
@@ -119,11 +145,12 @@ release in one evdev read, so the input layer keeps a tap alive for one frame.
 
 ## Status
 
-Phases 1 and 2 done in QEMU (BIOS and UEFI): boots into FujiNet CONFIG
-(or BASIC without FujiNet), browses TNFS hosts over the internet; keyboard,
-menu, sound, DHCP and power button work. Next, in order: real-hardware
-testing, Wi-Fi (set up from CONFIG), the media browser and laptop keys (lid,
-battery, backlight), the Altirra core, i686 netbooks.
+Runs on real laptops (tested: ASUS ZenBook UX425EA, Tiger Lake: boot to
+emulator in 5.6 s, i915, crisp 4x picture). QEMU-verified: BIOS and UEFI,
+BASIC and FujiNet CONFIG boots, TNFS over the internet, keyboard, menus,
+sound, DHCP, SSH, power button. Wi-Fi association is implemented but still
+to be verified on hardware. Next: laptop keys (lid, volume/brightness
+keys), the media browser, the Altirra core, i686 netbooks.
 
 ## Licence
 
