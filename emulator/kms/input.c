@@ -56,7 +56,7 @@ static int debug_keys = FALSE; /* -evdev-debug: log every key event */
 #define MAX_DEVS 32
 #define MAX_PADS 4
 
-enum dev_type { DEV_NONE, DEV_KEYBOARD, DEV_PAD };
+enum dev_type { DEV_NONE, DEV_KEYBOARD, DEV_PAD, DEV_HOTKEYS };
 
 struct pad_state {
 	int x, y;        /* -1, 0, 1 from the main stick */
@@ -119,6 +119,9 @@ static int classify(int fd)
 	   buttons also report EV_KEY but not these. */
 	if (BIT_SET(keybits, KEY_A) && BIT_SET(keybits, KEY_Z) && BIT_SET(keybits, KEY_ENTER))
 		return DEV_KEYBOARD;
+	/* Laptop hotkey devices (ACPI/WMI): volume and brightness only. */
+	if (BIT_SET(keybits, KEY_VOLUMEUP) || BIT_SET(keybits, KEY_BRIGHTNESSUP) || BIT_SET(keybits, KEY_MUTE))
+		return DEV_HOTKEYS;
 
 	/* Gamepads and joysticks: any BTN_JOYSTICK/BTN_GAMEPAD button plus an
 	   axis or hat. Touchpads have ABS_X too but only BTN_TOUCH/BTN_TOOL_*. */
@@ -200,6 +203,9 @@ static void open_dev(const char *name)
 	if (type == DEV_KEYBOARD) {
 		xioctl(fd, EVIOCGRAB, (void *)1);
 	}
+	else if (type == DEV_HOTKEYS) {
+		/* nothing to allocate */
+	}
 	else {
 		int p;
 		for (p = 0; p < MAX_PADS && pad_owner[p] >= 0; p++)
@@ -216,7 +222,7 @@ static void open_dev(const char *name)
 		read_abs_range(fd, ABS_X, &pads[p].xmin, &pads[p].xmax);
 		read_abs_range(fd, ABS_Y, &pads[p].ymin, &pads[p].ymax);
 	}
-	Log_print("evdev: %s %s: %s", type == DEV_KEYBOARD ? "keyboard" : "gamepad", name, desc);
+	Log_print("evdev: %s %s: %s", type == DEV_KEYBOARD ? "keyboard" : type == DEV_HOTKEYS ? "hotkeys" : "gamepad", name, desc);
 }
 
 static void scan_devices(void)
@@ -297,9 +303,26 @@ static void pad_event(struct pad_state *p, const struct input_event *ev)
 	}
 }
 
+/* Volume/brightness keys, from the keyboard (Fn combos) or a hotkey device. */
+static int media_key(const struct input_event *ev)
+{
+	if (ev->type != EV_KEY || ev->value != 1)
+		return FALSE;
+	switch (ev->code) {
+	case KEY_VOLUMEUP: case KEY_VOLUMEDOWN: case KEY_MUTE:
+	case KEY_BRIGHTNESSUP: case KEY_BRIGHTNESSDOWN:
+		KMS_SYSMENU_HotKey(ev->code);
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
 static void key_event(const struct input_event *ev)
 {
 	if (ev->type != EV_KEY || ev->code >= KEY_CNT)
+		return;
+	if (media_key(ev))
 		return;
 	if (ev->value == 1) {
 		keystate[ev->code / 8] |= (uint8_t)(1u << (ev->code % 8));
@@ -350,6 +373,8 @@ static void poll_events(void)
 			for (k = 0; k < count; k++) {
 				if (devs[i].type == DEV_KEYBOARD)
 					key_event(&evs[k]);
+				else if (devs[i].type == DEV_HOTKEYS)
+					media_key(&evs[k]);
 				else
 					pad_event(&pads[devs[i].pad], &evs[k]);
 			}

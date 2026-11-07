@@ -17,6 +17,8 @@ extern int KMS_SYSMENU_volume;     /* 0..100, -1 = untouched */
 extern int KMS_SYSMENU_brightness; /* 0..100, -1 = untouched */
 
 void KMS_SYSMENU_Run(void);
+/* Volume/brightness hotkeys (evdev KEY_* codes). */
+void KMS_SYSMENU_HotKey(int keycode);
 void KMS_SYSMENU_ApplySettings(void); /* after sound/video init */
 int KMS_SYSMENU_ReadConfig(char *option, char *parameters);
 void KMS_SYSMENU_WriteConfig(FILE *fp);

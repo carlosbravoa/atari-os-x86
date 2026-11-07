@@ -25,6 +25,7 @@
 #include "input.h"
 #include "log.h"
 #include "platform.h"
+#include "util.h"
 #ifdef SOUND
 #include "sound.h"
 #endif
@@ -130,6 +131,23 @@ int main(int argc, char **argv)
 		return 3;
 
 	for (;;) {
+#ifdef SOUND
+		/* The sound card may appear after we started (SOF firmware, USB
+		   audio): keep trying for a while instead of staying silent. */
+		if (!Sound_enabled) {
+			static double next_try = 0;
+			static int tries = 0;
+			double now = Util_time();
+			if (tries < 30 && now >= next_try) {
+				next_try = now + 2.0;
+				tries++;
+				if (Sound_Setup()) {
+					Sound_Continue();
+					KMS_SYSMENU_ApplySettings();
+				}
+			}
+		}
+#endif
 		INPUT_key_code = PLATFORM_Keyboard();
 		if (KMS_SYSMENU_requested) {
 			KMS_SYSMENU_requested = FALSE;

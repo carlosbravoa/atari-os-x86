@@ -55,7 +55,7 @@ apk add --root "$STAGE" --initdb --no-scripts --no-cache \
 	--keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories \
 	linux-lts musl busybox-static alsa-lib libdrm \
 	expat libcrypto3 zlib libstdc++ libgcc ca-certificates-bundle \
-	wpa_supplicant dropbear dropbear-convert $FIRMWARE_PKGS >/dev/null
+	wpa_supplicant iw dropbear dropbear-convert $FIRMWARE_PKGS >/dev/null
 fi
 KVER=$(ls "$STAGE/lib/modules")
 [ -n "$KVER" ] || die "no kernel modules in stage"
@@ -135,6 +135,10 @@ chmod +x "$INITRAMFS/etc/udhcpc.script"
 # Never bind the PC-speaker sound driver; it would show up as a sound card.
 mkdir -p "$INITRAMFS/etc/modprobe.d"
 printf 'blacklist snd_pcsp\nblacklist pcspkr\n' > "$INITRAMFS/etc/modprobe.d/blacklist.conf"
+# Intel Wi-Fi: power scheme 1 = always on. Balanced mode adds 1-2 s of
+# latency to inbound packets on an idle link, which makes SSH and FujiNet
+# feel broken.
+printf 'options iwlmvm power_scheme=1\noptions iwlwifi power_save=0\n' > "$INITRAMFS/etc/modprobe.d/iwlwifi.conf"
 echo "atari" > "$INITRAMFS/etc/hostname"
 printf '127.0.0.1 localhost atari\n' > "$INITRAMFS/etc/hosts"
 
@@ -143,9 +147,10 @@ copy_deps "$INITRAMFS/usr/bin/atari800"
 # Wi-Fi and SSH userspace (driven by init and the F8 System menu).
 mkdir -p "$INITRAMFS/sbin" "$INITRAMFS/usr/sbin" "$INITRAMFS/root/.ssh" "$INITRAMFS/etc/dropbear"
 cp "$STAGE/sbin/wpa_supplicant" "$STAGE/sbin/wpa_cli" "$INITRAMFS/sbin/"
+cp "$STAGE/usr/sbin/iw" "$INITRAMFS/usr/sbin/"
 cp "$STAGE/usr/sbin/dropbear" "$INITRAMFS/usr/sbin/"
 cp "$STAGE/usr/bin/dropbearkey" "$STAGE/usr/bin/dropbearconvert" "$INITRAMFS/usr/bin/"
-copy_deps "$INITRAMFS/sbin/wpa_supplicant" "$INITRAMFS/sbin/wpa_cli" "$INITRAMFS/usr/sbin/dropbear" \
+copy_deps "$INITRAMFS/sbin/wpa_supplicant" "$INITRAMFS/sbin/wpa_cli" "$INITRAMFS/usr/sbin/iw" "$INITRAMFS/usr/sbin/dropbear" \
 	"$INITRAMFS/usr/bin/dropbearkey" "$INITRAMFS/usr/bin/dropbearconvert"
 # dropbear needs an account database for root
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$INITRAMFS/etc/passwd"

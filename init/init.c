@@ -40,6 +40,7 @@
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <linux/netlink.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <linux/input.h>
@@ -76,6 +77,8 @@ static int emu_restarts = 0;
 static int emu_restart_requested = 0;
 static int fujinet_enabled = 0;   /* FujiNet-PC process available */
 static int ctl_fd = -1;
+static int uevent_fd = -1;
+static int uevent_pending = 0;
 static char wifi_iface[32] = "";
 
 /* Persisted settings (system.conf on the stick). */
@@ -346,6 +349,48 @@ static void coldplug(void)
 		queue_alias(base_modules[i]);
 	walk_modalias("/sys/devices", 0);
 	flush_batch();
+}
+
+/* Hotplug without udev: kernel uevents carry MODALIAS for every device
+   that appears later (SOF's audio machine driver, USB gadgets, i2c
+   touchpads). Queue them and modprobe in a batch shortly afterwards. */
+static void uevent_open(void)
+{
+	struct sockaddr_nl addr;
+	int sz = 1 << 20;
+	uevent_fd = socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
+	if (uevent_fd < 0)
+		return;
+	setsockopt(uevent_fd, SOL_SOCKET, SO_RCVBUFFORCE, &sz, sizeof sz);
+	memset(&addr, 0, sizeof addr);
+	addr.nl_family = AF_NETLINK;
+	addr.nl_groups = 1;
+	if (bind(uevent_fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+		close(uevent_fd);
+		uevent_fd = -1;
+	}
+}
+
+static void uevent_read(void)
+{
+	char buf[8192];
+	for (;;) {
+		ssize_t n = recv(uevent_fd, buf, sizeof buf - 1, 0);
+		char *p, *end;
+		int add = 0;
+		if (n <= 0)
+			return;
+		buf[n] = '\0';
+		end = buf + n;
+		if (strncmp(buf, "add@", 4) == 0 || strncmp(buf, "bind@", 5) == 0)
+			add = 1;
+		for (p = buf; p < end; p += strlen(p) + 1) {
+			if (add && strncmp(p, "MODALIAS=", 9) == 0) {
+				queue_alias(p + 9);
+				uevent_pending = 1;
+			}
+		}
+	}
 }
 
 /* ---- boot media -------------------------------------------------------- */
@@ -1237,7 +1282,7 @@ int main(void)
 {
 	sigset_t mask;
 	int sfd;
-	struct pollfd pfds[MAX_BUTTONS + 2];
+	struct pollfd pfds[MAX_BUTTONS + 3];
 
 	mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
 	mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
@@ -1272,7 +1317,10 @@ int main(void)
 		find_media();
 	if (media_mounted)
 		mount_modloop();
-	/* With the full module set: GPU, sound, network, odd input devices. */
+	/* With the full module set: GPU, sound, network, odd input devices.
+	   The uevent listener is open before this pass so devices that appear
+	   while it runs are not lost. */
+	uevent_open();
 	coldplug();
 	open_buttons();
 
@@ -1294,7 +1342,7 @@ int main(void)
 
 	for (;;) {
 		static int logs_saved = 0;
-		int i, n = 0, r, ctl_slot = -1;
+		int i, n = 0, r, ctl_slot = -1, uevent_slot = -1, timeout;
 		pfds[n].fd = sfd;
 		pfds[n].events = POLLIN;
 		n++;
@@ -1304,19 +1352,36 @@ int main(void)
 			pfds[n].events = POLLIN;
 			n++;
 		}
+		if (uevent_fd >= 0) {
+			uevent_slot = n;
+			pfds[n].fd = uevent_fd;
+			pfds[n].events = POLLIN;
+			n++;
+		}
 		for (i = 0; i < button_count; i++) {
 			pfds[n].fd = button_fds[i];
 			pfds[n].events = POLLIN;
 			n++;
 		}
-		r = poll(pfds, n, logs_saved ? -1 : 30000);
-		if (r == 0 && !logs_saved) {
-			save_logs(); /* 30 s after start: enough to see how the hardware came up */
-			logs_saved = 1;
+		/* Batch modprobes a moment after the last uevent burst. */
+		timeout = uevent_pending ? 300 : (logs_saved ? -1 : 30000);
+		r = poll(pfds, n, timeout);
+		if (r == 0) {
+			if (uevent_pending) {
+				uevent_pending = 0;
+				flush_batch();
+				continue;
+			}
+			if (!logs_saved) {
+				save_logs(); /* 30 s after start: enough to see how the hardware came up */
+				logs_saved = 1;
+			}
 			continue;
 		}
 		if (r < 0)
 			continue;
+		if (uevent_slot >= 0 && (pfds[uevent_slot].revents & POLLIN))
+			uevent_read();
 		if (pfds[0].revents & POLLIN) {
 			struct signalfd_siginfo si;
 			while (read(sfd, &si, sizeof si) == sizeof si) {
@@ -1381,7 +1446,7 @@ int main(void)
 			}
 		}
 		for (i = 1; i < n; i++)
-			if (i != ctl_slot && (pfds[i].revents & POLLIN))
+			if (i != ctl_slot && i != uevent_slot && (pfds[i].revents & POLLIN))
 				read_button(pfds[i].fd);
 	}
 }

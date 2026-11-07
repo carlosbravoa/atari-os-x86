@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <linux/input.h>
 
 #include "atari.h"
 #include "akey.h"
@@ -136,7 +137,7 @@ static int backlight_find(void)
 	while ((e = readdir(d)) != NULL) {
 		if (e->d_name[0] == '.')
 			continue;
-		snprintf(backlight_dir, sizeof backlight_dir, "/sys/class/backlight/%s", e->d_name);
+		snprintf(backlight_dir, sizeof backlight_dir, "/sys/class/backlight/%.200s", e->d_name);
 		break;
 	}
 	closedir(d);
@@ -216,6 +217,52 @@ void KMS_SYSMENU_ApplySettings(void)
 		ALSA_SetVolume(KMS_SYSMENU_volume);
 	if (KMS_SYSMENU_brightness >= 0)
 		backlight_set(KMS_SYSMENU_brightness);
+}
+
+/* ---- hotkeys ---------------------------------------------------------- */
+
+void KMS_SYSMENU_HotKey(int keycode)
+{
+	static int muted_volume = -1;
+	int v;
+	switch (keycode) {
+	case KEY_VOLUMEUP:
+	case KEY_VOLUMEDOWN:
+		v = ALSA_GetVolume();
+		if (v < 0)
+			return;
+		v += keycode == KEY_VOLUMEUP ? 5 : -5;
+		if (v < 0) v = 0;
+		if (v > 100) v = 100;
+		ALSA_SetVolume(v);
+		KMS_SYSMENU_volume = v;
+		muted_volume = -1;
+		break;
+	case KEY_MUTE:
+		v = ALSA_GetVolume();
+		if (v < 0)
+			return;
+		if (v > 0) {
+			muted_volume = v;
+			ALSA_SetVolume(0);
+		}
+		else {
+			ALSA_SetVolume(muted_volume > 0 ? muted_volume : 50);
+			KMS_SYSMENU_volume = muted_volume > 0 ? muted_volume : 50;
+		}
+		break;
+	case KEY_BRIGHTNESSUP:
+	case KEY_BRIGHTNESSDOWN:
+		v = backlight_get();
+		if (v < 0)
+			return;
+		v += keycode == KEY_BRIGHTNESSUP ? 10 : -10;
+		backlight_set(v);
+		KMS_SYSMENU_brightness = backlight_get();
+		break;
+	default:
+		break;
+	}
 }
 
 /* ---- menu pieces ----------------------------------------------------- */
@@ -382,7 +429,7 @@ void KMS_SYSMENU_Run(void)
 			status_get(status, "ip", ip, sizeof ip, "no network");
 			status_get(status, "battery", bat, sizeof bat, "");
 			if (bat[0])
-				snprintf(info_item, sizeof info_item, "IP %s   Battery %s%%", ip, bat);
+				snprintf(info_item, sizeof info_item, "IP %.40s   Battery %.8s%%", ip, bat);
 			else
 				snprintf(info_item, sizeof info_item, "IP %s", ip);
 		}
