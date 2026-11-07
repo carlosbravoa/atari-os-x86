@@ -52,8 +52,10 @@ a 60 Hz option.
    mode on the next emulator start; say so in the item's message:
    `NTSC: 60 Hz, smooth on this screen` / `PAL: 50 Hz (this screen is 60
    Hz: slight judder)`), persists via atari800's `DEFAULT_TV_MODE`.
-   Default stays PAL (the stick's config is written by atari800; do not
-   change the shipped default). The hardware page shows
+   **Default: NTSC** (decided 2026-11-07: "Atari was an NTSC first
+   machine"; a 60 Hz panel is the common case). The config seed in init
+   (and any seed in mkimage.sh) writes `DEFAULT_TV_MODE=NTSC`; an existing
+   `atari800.cfg` that says PAL is the user's choice and is left alone. The hardware page shows
    `Display: 1920x1080 @ 60 Hz, Atari PAL 49.9 Hz, pacing: timer|display`.
 4. **Stats for me**: `-kms-debug` already logs fps/flips/timeouts/busy
    every 5 s; add the number of frames the flip handler reports as
