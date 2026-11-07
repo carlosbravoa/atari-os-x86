@@ -651,6 +651,24 @@ static void start_debug_shell(void)
 	}
 }
 
+/* ---- logs on the stick ---------------------------------------------------- */
+
+/* Real laptops have no serial console: keep the kernel, emulator and
+   FujiNet logs on the stick, written shortly after boot and at shutdown. */
+static void save_logs(void)
+{
+	char *dmesg[] = { BUSYBOX, "sh", "-c",
+		"mkdir -p " MEDIA_USER "/logs && busybox dmesg > " MEDIA_USER "/logs/dmesg.txt 2>/dev/null;"
+		"for f in atari800 fujinet; do [ -f /run/$f.log ] && busybox cp /run/$f.log " MEDIA_USER "/logs/$f.log; done;"
+		"busybox cat /proc/cpuinfo /proc/meminfo > " MEDIA_USER "/logs/system.txt 2>/dev/null;"
+		"busybox lsmod > " MEDIA_USER "/logs/modules.txt 2>/dev/null;"
+		"busybox ip addr > " MEDIA_USER "/logs/network.txt 2>/dev/null;"
+		"busybox sync", NULL };
+	if (!media_mounted)
+		return;
+	run(dmesg);
+}
+
 /* ---- shutdown ---------------------------------------------------------- */
 
 static void shutdown_machine(int how)
@@ -671,6 +689,7 @@ static void shutdown_machine(int how)
 			waitpid(emu_pid, NULL, 0);
 		}
 	}
+	save_logs();
 	kill(-1, SIGTERM);
 	sleep_ms(300);
 	kill(-1, SIGKILL);
@@ -811,6 +830,7 @@ int main(void)
 		start_emulator();
 
 	for (;;) {
+		static int logs_saved = 0;
 		int i, n = 0, r;
 		pfds[n].fd = sfd;
 		pfds[n].events = POLLIN;
@@ -820,7 +840,12 @@ int main(void)
 			pfds[n].events = POLLIN;
 			n++;
 		}
-		r = poll(pfds, n, -1);
+		r = poll(pfds, n, logs_saved ? -1 : 30000);
+		if (r == 0 && !logs_saved) {
+			save_logs(); /* 30 s after start: enough to see how the hardware came up */
+			logs_saved = 1;
+			continue;
+		}
 		if (r < 0)
 			continue;
 		if (pfds[0].revents & POLLIN) {
