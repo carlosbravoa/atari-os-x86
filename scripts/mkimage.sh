@@ -102,7 +102,8 @@ if [ -x "$BUILD/fujinet/dist/fujinet" ]; then
 	cp "$BUILD/fujinet/dist/fujinet" "$INITRAMFS/usr/lib/fujinet/"
 	strip "$INITRAMFS/usr/lib/fujinet/fujinet"
 	cp -r "$BUILD/fujinet/dist/data" "$INITRAMFS/usr/lib/fujinet/"
-	cp "$BUILD/fujinet/dist/fnconfig.ini" "$INITRAMFS/usr/lib/fujinet/"
+	# Empty SSID: CONFIG must not wait on a fake "Dummy Cafe" network; init drives Wi-Fi.
+	sed "s/^SSID=.*/SSID=/" "$BUILD/fujinet/dist/fnconfig.ini" > "$INITRAMFS/usr/lib/fujinet/fnconfig.ini"
 	copy_deps "$INITRAMFS/usr/lib/fujinet/fujinet"
 	cp "$STAGE/etc/ssl/certs/ca-certificates.crt" "$INITRAMFS/etc/ssl/certs/"
 	ln -sf certs/ca-certificates.crt "$INITRAMFS/etc/ssl/cert.pem"

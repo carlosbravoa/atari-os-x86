@@ -18,6 +18,8 @@
  *   atari.noemu=1      set everything up but do not start the emulator
  *   atari.emudelay=N   wait N seconds before starting the emulator (debugging)
  *   atari.nofujinet=1  do not start FujiNet-PC or networking
+ *   atari.hwsim=1      load mac80211_hwsim (two virtual Wi-Fi radios) before
+ *                      networking, to exercise the Wi-Fi code in QEMU
  *
  * Licence: GPL-2.0-or-later, like the emulator it serves.
  */
@@ -68,6 +70,8 @@
 #define UDHCPC_SCRIPT "/etc/udhcpc.script"
 #define CTL_SOCK     "/run/atari.ctl"       /* System menu <-> init */
 #define WPA_CTRL_DIR "/run/wpa"
+#define WPA_LOG      "/run/wpa.log"        /* wpa_supplicant events (monitor) */
+#define WPA_MON_SOCK "/run/wpa-mon.sock"   /* our end of the event monitor */
 #define SYSCONF      MEDIA_USER "/config/system.conf"
 #define MEDIA_WAIT_S 15
 #define USB_DIR      MEDIA "/usb"           /* USB drives, one folder each */
@@ -77,6 +81,7 @@ static int nomedia = 0;
 static int noemu = 0;
 static int emudelay = 0;
 static int nofujinet = 0;
+static int hwsim = 0;
 static int media_mounted = 0;
 static pid_t emu_pid = -1;
 static pid_t shell_pid = -1;
@@ -90,6 +95,9 @@ static int uevent_fd = -1;
 static int uevent_pending = 0;
 static int usb_pending = 0;       /* block devices changed: rescan USB drives */
 static char wifi_iface[32] = "";
+static int wpa_mon_fd = -1;        /* attached to wpa_supplicant's events */
+static char wifi_err[48] = "";     /* last failure since the last connect */
+static int wifi_scanned = 1;       /* a scan finished since the last connect */
 
 /* Persisted settings (system.conf on the stick). */
 static struct {
@@ -1083,6 +1091,101 @@ static void usb_unmount_all(void)
 
 /* ---- networking ---------------------------------------------------------- */
 
+/* ---- wpa_supplicant events ----------------------------------------------- */
+
+/* Alpine's wpa_supplicant has no -f (debug file), and its stdout is not
+   flushed line by line, so init attaches to the control interface as an
+   event monitor instead: events go to WPA_LOG and the last failure since
+   the last connect request becomes the "wifierr" status line. */
+static void wpa(const char *a1, const char *a2, const char *a3, char *out, size_t size);
+
+/* Is any network configured? NETWORK-NOT-FOUND also comes after scans
+   with nothing configured, which is no failure. */
+static int wpa_has_network(void)
+{
+	char buf[2048];
+	char *nl;
+	wpa("list_networks", NULL, NULL, buf, sizeof buf);
+	nl = strchr(buf, '\n'); /* header: network id / ssid / bssid / flags */
+	return nl && isdigit((unsigned char)nl[1]);
+}
+
+static void wpa_mon_open(void)
+{
+	struct sockaddr_un addr;
+	if (wpa_mon_fd >= 0 || !wifi_iface[0])
+		return;
+	wpa_mon_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (wpa_mon_fd < 0)
+		return;
+	memset(&addr, 0, sizeof addr);
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, WPA_MON_SOCK, sizeof addr.sun_path - 1);
+	unlink(WPA_MON_SOCK);
+	if (bind(wpa_mon_fd, (struct sockaddr *)&addr, sizeof addr) < 0)
+		goto fail;
+	memset(&addr, 0, sizeof addr);
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof addr.sun_path, "%s/%s", WPA_CTRL_DIR, wifi_iface);
+	if (connect(wpa_mon_fd, (struct sockaddr *)&addr, sizeof addr) < 0
+	    || send(wpa_mon_fd, "ATTACH", 6, 0) != 6)
+		goto fail;
+	logmsg("wifi: watching wpa_supplicant events on %s", wifi_iface);
+	return;
+fail:
+	close(wpa_mon_fd);
+	wpa_mon_fd = -1;
+	unlink(WPA_MON_SOCK);
+}
+
+static void wpa_mon_read(void)
+{
+	char buf[1024];
+	ssize_t n;
+	while ((n = recv(wpa_mon_fd, buf, sizeof buf - 1, 0)) > 0) {
+		char *ev = buf, *nl;
+		struct timespec ts;
+		FILE *f;
+		struct stat st;
+		buf[n] = '\0';
+		if (ev[0] != '<')
+			continue; /* "OK" for ATTACH */
+		ev = strchr(ev, '>');
+		if (!ev)
+			continue;
+		ev++;
+		nl = strchr(ev, '\n');
+		if (nl)
+			*nl = '\0';
+		if (strstr(ev, "CTRL-EVENT-SCAN-RESULTS"))
+			wifi_scanned = 1;
+		if (strstr(ev, "SCAN-STARTED") || strstr(ev, "SCAN-RESULTS") || strstr(ev, "BSS-ADDED")
+		    || strstr(ev, "BSS-REMOVED"))
+			continue;
+		if (strstr(ev, "CTRL-EVENT-SSID-TEMP-DISABLED")) {
+			if (strstr(ev, "reason=WRONG_KEY"))
+				snprintf(wifi_err, sizeof wifi_err, "wrong password");
+			else if (strstr(ev, "reason=CONN_FAILED") || strstr(ev, "reason=AUTH_FAILED"))
+				snprintf(wifi_err, sizeof wifi_err, "connection failed");
+		}
+		else if (strstr(ev, "CTRL-EVENT-NETWORK-NOT-FOUND")) {
+			/* right after select_network wpa_supplicant judges by the
+			   old scan results: wait for a fresh scan */
+			if (wifi_scanned && wpa_has_network())
+				snprintf(wifi_err, sizeof wifi_err, "network not found");
+		}
+		else if (strstr(ev, "CTRL-EVENT-CONNECTED"))
+			wifi_err[0] = '\0';
+		/* keep the log small: start over past 256 KB */
+		f = fopen(WPA_LOG, stat(WPA_LOG, &st) == 0 && st.st_size > 256 * 1024 ? "w" : "a");
+		if (f) {
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			fprintf(f, "%5ld.%03ld %s\n", (long)ts.tv_sec, ts.tv_nsec / 1000000L, ev);
+			fclose(f);
+		}
+	}
+}
+
 /* No network manager: every wired interface gets DHCP in the background.
    Wi-Fi comes later (wpa_supplicant driven from FujiNet's CONFIG). */
 static void start_network(void)
@@ -1129,6 +1232,7 @@ static void start_network(void)
 			(void)dhcp;
 			run(dhcp_retry);
 			logmsg("wifi: wpa_supplicant and dhcp started on %s", e->d_name);
+			wpa_mon_open();
 			continue;
 		}
 		dhcp_retry[3] = e->d_name;
@@ -1557,6 +1661,11 @@ static void cmd_status(int fd)
 		else
 			snprintf(line, sizeof line, "wifi not connected\n");
 		reply(fd, line);
+		wpa_mon_open(); /* in case wpa_supplicant was not up at boot */
+		if (strcmp(state, "COMPLETED") != 0 && wifi_err[0]) {
+			snprintf(line, sizeof line, "wifierr %s\n", wifi_err);
+			reply(fd, line);
+		}
 	}
 	{
 		DIR *d = opendir("/sys/class/power_supply");
@@ -1605,10 +1714,21 @@ static void cmd_wifi_results(int fd)
 	reply(fd, "OK\n");
 }
 
+/* A WPA2 passphrase is 8..63 printable characters; 64 hex digits are a
+   raw PSK and go to wpa_supplicant without quotes. */
+static int is_hex_psk(const char *psk)
+{
+	int i;
+	for (i = 0; psk[i]; i++)
+		if (!isxdigit((unsigned char)psk[i]))
+			return 0;
+	return i == 64;
+}
+
 /* "wifi connect\t<ssid>\t<psk>" */
 static void cmd_wifi_connect(int fd, char *args)
 {
-	char *ssid = args, *psk, buf[512], id[16], q[1100];
+	char *ssid = args, *psk, buf[512], id[16], q[1100], pq[1100];
 	if (!wifi_iface[0]) {
 		reply(fd, "ERR no wifi adapter\n");
 		return;
@@ -1619,6 +1739,9 @@ static void cmd_wifi_connect(int fd, char *args)
 		return;
 	}
 	*psk++ = '\0';
+	logmsg("wifi: ssid \"%s\" psk_len %d", ssid, (int)strlen(psk));
+	wifi_err[0] = '\0'; /* a fresh attempt: forget earlier failures */
+	wpa_mon_open();
 	wpa("remove_network", "all", NULL, buf, sizeof buf);
 	wpa("add_network", NULL, NULL, buf, sizeof buf);
 	if (sscanf(buf, "%15s", id) != 1 || !isdigit((unsigned char)id[0])) {
@@ -1632,15 +1755,31 @@ static void cmd_wifi_connect(int fd, char *args)
 		run_output(argv, buf, sizeof buf);
 	}
 	if (psk[0]) {
-		char pq[1100];
-		snprintf(pq, sizeof pq, "\"%s\"", psk);
 		char *argv[] = { "/sbin/wpa_cli", "-p", WPA_CTRL_DIR, "-i", wifi_iface, "set_network", id, "psk", pq, NULL };
+		if (is_hex_psk(psk))
+			snprintf(pq, sizeof pq, "%s", psk);
+		else
+			snprintf(pq, sizeof pq, "\"%s\"", psk);
 		run_output(argv, buf, sizeof buf);
+		buf[strcspn(buf, "\n")] = '\0';
+		logmsg("wifi: set_network psk: %s", buf[0] ? buf : "(no reply)");
+		if (strcmp(buf, "OK") != 0) {
+			wpa("remove_network", id, NULL, buf, sizeof buf);
+			wpa("save_config", NULL, NULL, buf, sizeof buf);
+			reply(fd, "ERR password rejected by wpa_supplicant (8-63 characters)\n");
+			return;
+		}
 	}
 	else {
 		char *argv[] = { "/sbin/wpa_cli", "-p", WPA_CTRL_DIR, "-i", wifi_iface, "set_network", id, "key_mgmt", "NONE", NULL };
 		run_output(argv, buf, sizeof buf);
 	}
+	/* events about the old network or from before the request: logged,
+	   then forgotten */
+	if (wpa_mon_fd >= 0)
+		wpa_mon_read();
+	wifi_err[0] = '\0';
+	wifi_scanned = 0;
 	wpa("enable_network", id, NULL, buf, sizeof buf);
 	wpa("select_network", id, NULL, buf, sizeof buf);
 	wpa("save_config", NULL, NULL, buf, sizeof buf);
@@ -1667,7 +1806,9 @@ static void ctl_handle(int fd)
 		if (nl)
 			*nl = '\0';
 	}
-	logmsg("ctl: %s", strncmp(line, "wifi connect", 12) == 0 ? "wifi connect" : line);
+	/* "status" is polled (FujiNet's network bridge, the menus): not logged */
+	if (strcmp(line, "status") != 0)
+		logmsg("ctl: %s", strncmp(line, "wifi connect", 12) == 0 ? "wifi connect" : line);
 
 	if (strcmp(line, "status") == 0)
 		cmd_status(fd);
@@ -1712,6 +1853,7 @@ static void ctl_handle(int fd)
 			wpa("remove_network", "all", NULL, buf, sizeof buf);
 			wpa("save_config", NULL, NULL, buf, sizeof buf);
 		}
+		wifi_err[0] = '\0';
 		reply(fd, "OK\n");
 	}
 	else if (strncmp(line, "password ", 9) == 0) {
@@ -1770,7 +1912,7 @@ static void save_logs(void)
 {
 	char *dmesg[] = { BUSYBOX, "sh", "-c",
 		"mkdir -p " MEDIA_USER "/logs && busybox dmesg > " MEDIA_USER "/logs/dmesg.txt 2>/dev/null;"
-		"for f in atari800 fujinet; do [ -f /run/$f.log ] && busybox cp /run/$f.log " MEDIA_USER "/logs/$f.log; done;"
+		"for f in atari800 fujinet wpa; do [ -f /run/$f.log ] && busybox cp /run/$f.log " MEDIA_USER "/logs/$f.log; done;"
 		"busybox cat /proc/cpuinfo /proc/meminfo > " MEDIA_USER "/logs/system.txt 2>/dev/null;"
 		"busybox lsmod > " MEDIA_USER "/logs/modules.txt 2>/dev/null;"
 		"busybox ip addr > " MEDIA_USER "/logs/network.txt 2>/dev/null;"
@@ -1878,6 +2020,8 @@ static void parse_cmdline(void)
 		noemu = 1;
 	if (strstr(buf, "atari.nofujinet=1"))
 		nofujinet = 1;
+	if (strstr(buf, "atari.hwsim=1"))
+		hwsim = 1;
 	{
 		const char *p = strstr(buf, "atari.emudelay=");
 		if (p)
@@ -1889,7 +2033,7 @@ int main(void)
 {
 	sigset_t mask;
 	int sfd;
-	struct pollfd pfds[MAX_BUTTONS + 3];
+	struct pollfd pfds[MAX_BUTTONS + 4];
 
 	mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
 	mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
@@ -1948,6 +2092,12 @@ int main(void)
 	load_sysconf();
 	apply_rootpw();
 	ctl_open();
+	if (hwsim) {
+		char *mp[] = { BUSYBOX, "modprobe", "mac80211_hwsim", "radios=2", NULL };
+		run(mp);
+		sleep_ms(500);
+		logmsg("hwsim: virtual Wi-Fi radios loaded");
+	}
 	start_network();
 	splash_line("Network starting");
 	fujinet_enabled = !nofujinet && exists(FUJINET_BIN);
@@ -1968,7 +2118,7 @@ int main(void)
 
 	for (;;) {
 		static int logs_saved = 0;
-		int i, n = 0, r, ctl_slot = -1, uevent_slot = -1, timeout;
+		int i, n = 0, r, ctl_slot = -1, uevent_slot = -1, mon_slot = -1, timeout;
 		pfds[n].fd = sfd;
 		pfds[n].events = POLLIN;
 		n++;
@@ -1981,6 +2131,12 @@ int main(void)
 		if (uevent_fd >= 0) {
 			uevent_slot = n;
 			pfds[n].fd = uevent_fd;
+			pfds[n].events = POLLIN;
+			n++;
+		}
+		if (wpa_mon_fd >= 0) {
+			mon_slot = n;
+			pfds[n].fd = wpa_mon_fd;
 			pfds[n].events = POLLIN;
 			n++;
 		}
@@ -2012,6 +2168,12 @@ int main(void)
 			continue;
 		if (uevent_slot >= 0 && (pfds[uevent_slot].revents & POLLIN))
 			uevent_read();
+		if (mon_slot >= 0 && (pfds[mon_slot].revents & POLLIN))
+			wpa_mon_read();
+		if (mon_slot >= 0 && (pfds[mon_slot].revents & (POLLERR | POLLHUP)) && wpa_mon_fd >= 0) {
+			close(wpa_mon_fd); /* wpa_supplicant went away; re-attached on demand */
+			wpa_mon_fd = -1;
+		}
 		if (pfds[0].revents & POLLIN) {
 			struct signalfd_siginfo si;
 			while (read(sfd, &si, sizeof si) == sizeof si) {
@@ -2079,7 +2241,7 @@ int main(void)
 			}
 		}
 		for (i = 1; i < n; i++)
-			if (i != ctl_slot && i != uevent_slot && (pfds[i].revents & POLLIN))
+			if (i != ctl_slot && i != uevent_slot && i != mon_slot && (pfds[i].revents & POLLIN))
 				read_button(pfds[i].fd);
 	}
 }

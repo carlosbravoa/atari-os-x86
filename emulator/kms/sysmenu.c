@@ -91,6 +91,7 @@ static int ctl_request(const char *cmd, char *reply, size_t size)
 		}
 		if (strncmp(line, "ERR", 3) == 0) {
 			Util_strlcpy(reply, line + 4, size);
+			reply[strcspn(reply, "\n")] = '\0'; /* shown as is by fMessage */
 			break;
 		}
 		if (used + strlen(line) < size) {
@@ -401,6 +402,78 @@ static void wait_seconds(double s)
 	}
 }
 
+/* fMessage shows one 38-column line; longer texts (an ERR reply from
+   init) go to an info page, word-wrapped. */
+static void long_message(const char *text)
+{
+	static char page[512];
+	size_t n = 0;
+	const char *p = text;
+	if (strlen(text) <= 38) {
+		UI_driver->fMessage(text, TRUE);
+		return;
+	}
+	while (*p && n + 40 < sizeof page) {
+		size_t len = strlen(p);
+		if (len > 36) {
+			len = 36;
+			while (len > 0 && p[len] != ' ')
+				len--;
+			if (len == 0)
+				len = 36;
+		}
+		memcpy(page + n, p, len);
+		n += len;
+		page[n++] = '\0';
+		p += len;
+		while (*p == ' ')
+			p++;
+	}
+	page[n++] = '\n';
+	page[n] = '\0';
+	UI_driver->fInfoScreen("Wi-Fi", page);
+}
+
+/* After "wifi connect": poll the status once a second for up to 20 s,
+   showing wpa_supplicant's state, until connected with an address or a
+   failure ("wifierr") is reported. */
+static void wifi_wait_connected(const char *want_ssid)
+{
+	char status[1024], state[80], ip[64], err[64], word[24], line[128];
+	int i, room, connected = FALSE;
+
+	state[0] = ip[0] = err[0] = '\0';
+	for (i = 0; i < 20; i++) {
+		wait_seconds(1.0);
+		if (!ctl_request("status", status, sizeof status))
+			continue;
+		status_get(status, "wifi", state, sizeof state, "?");
+		status_get(status, "ip", ip, sizeof ip, "");
+		status_get(status, "wifierr", err, sizeof err, "");
+		connected = strncmp(state, "connected", 9) == 0;
+		if (err[0] || (connected && ip[0]))
+			break;
+		/* "SCANNING wifly", "ASSOCIATING wifly", "not connected" */
+		if (connected)
+			Util_strlcpy(word, "getting address", sizeof word);
+		else if (strncmp(state, "not ", 4) == 0 || sscanf(state, "%23s", word) != 1)
+			word[0] = '\0';
+		snprintf(line, sizeof line, "Connecting... %s", word);
+		UI_driver->fMessage(line, FALSE);
+	}
+	room = 38 - 14 - (int)strlen(ip);
+	if (room < 4)
+		room = 4;
+	if (connected && ip[0])
+		snprintf(line, sizeof line, "Connected: %.*s (%.20s)", room, want_ssid, ip);
+	else if (err[0])
+		snprintf(line, sizeof line, "Wi-Fi: %.30s", err);
+	else
+		snprintf(line, sizeof line, "Wi-Fi: %.30s", state);
+	Log_print("sysmenu: wifi connect \"%s\": %s", want_ssid, line);
+	UI_driver->fMessage(line, TRUE);
+}
+
 static void wifi_menu(void)
 {
 	static char results[4096];
@@ -475,20 +548,20 @@ static void wifi_menu(void)
 			char psk[80] = "";
 			char cmd[200];
 			if (strcmp(flags[choice], "open") != 0) {
-				if (!UI_driver->fEditString("Password", psk, sizeof psk))
+				/* WPA2 passphrases are 8..63 characters. (The Atari
+				   has no { } ~ ` keys, and its font cannot show them
+				   in this title either: see KNOWN-ISSUES.md.) The
+				   edit box is 32 columns, the title must fit. */
+				if (!UI_driver->fEditString("Password (8-63 characters)", psk, sizeof psk))
 					continue;
 			}
 			snprintf(cmd, sizeof cmd, "wifi connect\t%s\t%s", ssids[choice], psk);
 			UI_driver->fMessage("Connecting...", FALSE);
 			if (!ctl_request(cmd, results, sizeof results)) {
-				UI_driver->fMessage(results[0] ? results : "Connection failed", TRUE);
+				long_message(results[0] ? results : "Connection failed");
 				continue;
 			}
-			wait_seconds(8.0);
-			ctl_request("status", status, sizeof status);
-			status_get(status, "wifi", state, sizeof state, "?");
-			snprintf(line, sizeof line, "Wi-Fi: %s", state);
-			UI_driver->fMessage(line, TRUE);
+			wifi_wait_connected(ssids[choice]);
 			return;
 		}
 	}

@@ -9,7 +9,10 @@
  * and FujiNet's SD folder. RETURN on a file offers Run, Mount, Copy to
  * another source and Favourite. Recent programs and favourites persist in
  * atari/config/library.cfg. Drawn with atari800's UI driver, like the F1
- * and F8 menus; everything happens on the host side.
+ * and F8 menus; everything happens on the host side. A .zip is opened
+ * here too: its Atari files are listed, the chosen one is extracted to
+ * /run/atari-zip and then treated like any other file; Recent and
+ * Favourites remember it as "<zip path>!<entry>".
  *
  * This file is part of the Atari800 emulator project which emulates
  * the Atari 400, 800, 800XL, 130XE, and 5200 8-bit computers.
@@ -44,9 +47,11 @@
 #include "util.h"
 #include "kms/kms_library.h"
 #include "kms/kms_video.h"
+#include "kms/kms_zipfile.h"
 
 #define STICK_USER   "/media/atari"   /* MEDIA_USER in init/init.c */
 #define USB_DIR      "/media/usb"     /* PID 1 mounts USB drives here */
+#define ZIP_RUN_DIR  "/run/atari-zip" /* zipped files are extracted here (tmpfs) */
 
 #define MAX_SOURCES  10
 #define MAX_VOLS     (MAX_SOURCES - 2)
@@ -228,6 +233,73 @@ static int file_kind(const char *name)
 	if (Util_striendswith(name, ".zip") || Util_striendswith(name, ".a8s"))
 		return FK_OTHER;
 	return FK_DISK;
+}
+
+static int is_zip(const char *name)
+{
+	return Util_striendswith(name, ".zip");
+}
+
+static int is_regular(const char *path)
+{
+	struct stat st;
+	return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* "/x/PACK.ZIP!GAMES/A.XEX" (a zipped file in Recent or Favourites):
+   copies the zip path to zip and points *entry at the name inside it.
+   FALSE when ref is a plain path. Several ".zip!" in one path: the first
+   whose zip exists wins. */
+static int split_zip_ref(const char *ref, char *zip, size_t size, const char **entry)
+{
+	const char *p = ref, *first = NULL;
+	while ((p = strchr(p, '!')) != NULL) {
+		if (p - ref >= 4 && Util_strnicmp(p - 4, ".zip", 4) == 0 && p[1] != '\0') {
+			size_t len = (size_t)(p - ref);
+			if (!first)
+				first = p;
+			if (len < size) {
+				memcpy(zip, ref, len);
+				zip[len] = '\0';
+				if (is_regular(zip)) {
+					*entry = p + 1;
+					return TRUE;
+				}
+			}
+		}
+		p++;
+	}
+	if (!first || (size_t)(first - ref) >= size)
+		return FALSE;
+	memcpy(zip, ref, (size_t)(first - ref));
+	zip[first - ref] = '\0';
+	*entry = first + 1;
+	return TRUE;
+}
+
+/* out = a + "!" + b (truncated to size) */
+static void bang_join(char *out, size_t size, const char *a, const char *b)
+{
+	size_t len;
+	Util_strlcpy(out, a, size);
+	len = strlen(out);
+	if (len + 1 < size) {
+		out[len++] = '!';
+		out[len] = '\0';
+		Util_strlcpy(out + len, b, size - len);
+	}
+}
+
+/* What a path is called on screen: its file name, "NAME.ZIP!FILE.XEX" for
+   a zipped one. */
+static void display_name(const char *ref, char *out, size_t size)
+{
+	char zip[FILENAME_MAX];
+	const char *entry;
+	if (split_zip_ref(ref, zip, sizeof zip, &entry))
+		bang_join(out, size, base_name(zip), base_name(entry));
+	else
+		Util_strlcpy(out, base_name(ref), size);
 }
 
 /* ---- sources ---------------------------------------------------------- */
@@ -526,7 +598,16 @@ static void menu_add_file(int retval, const char *prefix, const char *name, int 
 static void menu_add_path(int retval, const char *path)
 {
 	struct stat st;
-	int there = stat(path, &st) == 0 && S_ISREG(st.st_mode);
+	int there;
+	char zip[FILENAME_MAX], shown[FILENAME_MAX];
+	const char *entry;
+	if (split_zip_ref(path, zip, sizeof zip, &entry)) {
+		there = is_regular(zip);
+		display_name(path, shown, sizeof shown);
+		menu_add_file(retval, !there ? "?" : fav_index(path) >= 0 ? "*" : " ", shown, FALSE, 0, FALSE);
+		return;
+	}
+	there = stat(path, &st) == 0 && S_ISREG(st.st_mode);
 	menu_add_file(retval, !there ? "?" : fav_index(path) >= 0 ? "*" : " ",
 	              base_name(path), FALSE, there ? (unsigned long)st.st_size : 0, there);
 }
@@ -559,31 +640,42 @@ static void cant(const char *what, const char *path)
 	message(line);
 }
 
-/* "Game (Disk 1).atr" -> "Game (Disk 2).atr" ... in D2:..D4: */
-static void mount_siblings(const char *path)
+/* Position of the "1" in a first-disk name ("Game (Disk 1).atr",
+   "game_d1.atr", "Game Side 1.atr"), or -1. */
+static int disk1_pos(const char *file)
 {
 	static const char *const pats[] = { "(disk 1", " disk 1", " disk1", "_disk1", "_d1", " side 1", NULL };
-	char dir[FILENAME_MAX], lower[256], want[256], found[FILENAME_MAX];
-	const char *file = base_name(path);
-	int i, pos = -1, n;
+	char lower[256];
+	int i;
 
-	if (strlen(file) >= sizeof lower || file == path)
-		return;
-	Util_strlcpy(dir, path, sizeof dir);
-	dir[file - path - 1] = '\0';
+	if (strlen(file) >= sizeof lower)
+		return -1;
 	Util_strlcpy(lower, file, sizeof lower);
 	Util_strlower(lower);
-	for (i = 0; pats[i] && pos < 0; i++) {
+	for (i = 0; pats[i]; i++) {
 		const char *p = lower;
 		while ((p = strstr(p, pats[i])) != NULL) {
 			size_t one = (size_t)(p - lower) + strlen(pats[i]) - 1;
-			if (lower[one + 1] < '0' || lower[one + 1] > '9') {
-				pos = (int)one;
-				break;
-			}
+			if (lower[one + 1] < '0' || lower[one + 1] > '9')
+				return (int)one;
 			p++;
 		}
 	}
+	return -1;
+}
+
+/* "Game (Disk 1).atr" -> "Game (Disk 2).atr" ... in D2:..D4: */
+static void mount_siblings(const char *path)
+{
+	char dir[FILENAME_MAX], want[256], found[FILENAME_MAX];
+	const char *file = base_name(path);
+	int pos, n;
+
+	if (file == path || strlen(file) >= sizeof want)
+		return;
+	Util_strlcpy(dir, path, sizeof dir);
+	dir[file - path - 1] = '\0';
+	pos = disk1_pos(file);
 	if (pos < 0)
 		return;
 	for (n = 2; n <= 4; n++) {
@@ -616,7 +708,9 @@ static int pick_cart_type(int kb)
 	return TRUE;
 }
 
-static int run_file(const char *path)
+/* ref is what Recent remembers: path itself, or "zip!entry" when path is
+   the extracted copy of a zipped file. */
+static int run_file(const char *path, const char *ref)
 {
 	int type;
 	Log_print("library: run %s", path);
@@ -635,7 +729,7 @@ static int run_file(const char *path)
 	default:
 		break;
 	}
-	add_recent(path);
+	add_recent(ref);
 	save_cfg();
 	return TRUE;
 }
@@ -807,23 +901,176 @@ static void copy_file(const char *path, int dst)
 	message(sources[dst].kind == SRC_USB ? "Copied. Safe to unplug." : "Copied.");
 }
 
+/* ---- zip files -------------------------------------------------------- */
+
+static ZIP_entry *zip_list = NULL;   /* for zip_cmp */
+
+static int zip_cmp(const void *a, const void *b)
+{
+	const ZIP_entry *x = &zip_list[*(const int *)a];
+	const ZIP_entry *y = &zip_list[*(const int *)b];
+	int r = Util_stricmp(x->name, y->name);
+	return r ? r : strcmp(x->name, y->name);
+}
+
+static void zip_failed(const char *zip, const char *why)
+{
+	char line[48];
+	Log_print("library: zip %s: %s", zip, why);
+	snprintf(line, sizeof line, "Could not open zip: %.18s", why);
+	message(line);
+}
+
+/* Where zipped files are extracted: /run/atari-zip, else under $TMPDIR or
+   /tmp. Emptied first; extracted files are stored flat by file name. */
+static const char *zip_run_dir(void)
+{
+	static char dir[FILENAME_MAX];
+	const char *tmp = getenv("TMPDIR");
+	DIR *d;
+	struct dirent *e;
+
+	Util_strlcpy(dir, ZIP_RUN_DIR, sizeof dir);
+	if (!make_dirs(dir) || access(dir, W_OK) != 0) {
+		snprintf(dir, sizeof dir, "%.3000s/atari-zip", tmp && tmp[0] ? tmp : "/tmp");
+		if (!make_dirs(dir) || access(dir, W_OK) != 0)
+			return NULL;
+	}
+	d = opendir(dir);
+	while (d && (e = readdir(d)) != NULL) {
+		char path[FILENAME_MAX];
+		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+			continue;
+		join_path(path, sizeof path, dir, e->d_name);
+		unlink(path);
+	}
+	if (d)
+		closedir(d);
+	return dir;
+}
+
+static int zip_extract_one(const char *zip, const ZIP_entry *e, const char *dir, char *out, size_t size)
+{
+	char err[64];
+	join_path(out, size, dir, base_name(e->name));
+	if (!ZIP_Extract(zip, e, out, err, sizeof err)) {
+		zip_failed(zip, err);
+		return FALSE;
+	}
+	Log_print("library: zip %s!%s -> %s", zip, e->name, out);
+	return TRUE;
+}
+
+/* Opens a zip: lists its Atari files, takes the one named want (Recent,
+   Favourites) or the only one, or asks; extracts it (and, for a first
+   disk, disks 2..4 from the same folder so the sibling scan finds them).
+   Returns TRUE with the entry name and the extracted file. */
+static int zip_prepare(const char *zip, const char *want, char *entry, size_t esize, char *file, size_t fsize)
+{
+	ZIP_entry *list;
+	int *media;
+	char err[64], title[40], extra[FILENAME_MAX];
+	const char *dir;
+	int n, m = 0, i, pick = -1, pos, ok = FALSE;
+
+	n = ZIP_List(zip, &list, err, sizeof err);
+	if (n < 0) {
+		zip_failed(zip, err);
+		return FALSE;
+	}
+	media = (int *)malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+	if (!media) {
+		free(list);
+		return FALSE;
+	}
+	for (i = 0; i < n; i++)
+		if (is_media(base_name(list[i].name)) && !is_zip(list[i].name))
+			media[m++] = i;
+	Log_print("library: zip %s: %d entries, %d Atari files", zip, n, m);
+	zip_list = list;
+	qsort(media, (size_t)m, sizeof media[0], zip_cmp);
+
+	if (want) {
+		for (i = 0; i < m && pick < 0; i++)
+			if (strcmp(list[media[i]].name, want) == 0)
+				pick = media[i];
+		if (pick < 0)
+			zip_failed(zip, "file not in it");
+	}
+	else if (m == 0)
+		message("No Atari files in this zip");
+	else if (m == 1)
+		pick = media[0];
+	else {
+		int r;
+		snprintf(title, sizeof title, "%.36s", base_name(zip));
+		menu_reset();
+		menu_add(-1, NULL, title, NULL);
+		for (i = 0; i < m && i < MENU_MAX - 3; i++) {
+			/* a popup prints the suffix right after the text: keep a gap */
+			char size[16], sfx[20], text[40];
+			format_size(list[media[i]].usize, size, sizeof size);
+			snprintf(sfx, sizeof sfx, " %s", size);
+			snprintf(text, sizeof text, "%.*s", 36 - (int)strlen(sfx), list[media[i]].name);
+			menu_add(RV_ENTRY + i, " ", text, sfx);
+		}
+		if (i < m)
+			menu_add(-1, NULL, "(more files not shown)", NULL);
+		menu_add(ACT_CANCEL, NULL, "Cancel", NULL);
+		r = UI_driver->fSelect(title, UI_SELECT_POPUP, RV_ENTRY, menu, NULL);
+		if (r >= RV_ENTRY && r < RV_ENTRY + m)
+			pick = media[r - RV_ENTRY];
+	}
+
+	if (pick >= 0 && (dir = zip_run_dir()) == NULL)
+		zip_failed(zip, "nowhere to unpack");
+	else if (pick >= 0 && zip_extract_one(zip, &list[pick], dir, file, fsize)) {
+		const char *base = base_name(list[pick].name);
+		size_t dirlen = (size_t)(base - list[pick].name);
+		ok = TRUE;
+		Util_strlcpy(entry, list[pick].name, esize);
+		pos = disk1_pos(base);
+		if (pos >= 0) {
+			int k;
+			for (k = 2; k <= 4; k++) {
+				char sib[ZIP_NAME_MAX];
+				int found = -1;
+				Util_strlcpy(sib, base, sizeof sib);
+				sib[pos] = (char)('0' + k);
+				for (i = 0; i < m && found < 0; i++) {
+					const char *name = list[media[i]].name;
+					if (strlen(name) > dirlen && strncmp(name, list[pick].name, dirlen) == 0
+					    && strchr(name + dirlen, '/') == NULL && Util_stricmp(name + dirlen, sib) == 0)
+						found = media[i];
+				}
+				if (found < 0 || !zip_extract_one(zip, &list[found], dir, extra, sizeof extra))
+					break;
+			}
+		}
+	}
+	free(media);
+	free(list);
+	zip_list = NULL;
+	return ok;
+}
+
 /* ---- action popup ----------------------------------------------------- */
 
-/* Returns TRUE when a program was started. */
-static int file_popup(const char *path_in)
+/* run: the file to open (the extracted copy for a zipped one; NULL when
+   its drive is not plugged in); ref: what Recent and Favourites remember;
+   copy: what "Copy to" copies (a zip is copied whole); title: its name.
+   Returns TRUE when a program was started. */
+static int action_popup(const char *run, const char *ref, const char *copy, const char *title)
 {
-	char path[FILENAME_MAX], name[40], line[40];
-	struct stat st;
-	int there, kind, from, i, r;
+	char line[40];
+	int kind, from, i, r;
+	int there = run != NULL && is_regular(run);
 
-	Util_strlcpy(path, path_in, sizeof path); /* recent[] changes under us */
-	there = stat(path, &st) == 0 && S_ISREG(st.st_mode);
-	kind = file_kind(path);
-	from = source_of(path, NULL);
-	snprintf(name, sizeof name, "%.36s", base_name(path));
+	kind = file_kind(there ? run : ref);
+	from = source_of(copy, NULL);
 
 	menu_reset();
-	menu_add(-1, NULL, name, NULL);
+	menu_add(-1, NULL, title, NULL);
 	if (there) {
 		menu_add(ACT_RUN, NULL, "Run", NULL);
 		if (kind == FK_DISK)
@@ -841,19 +1088,46 @@ static int file_popup(const char *path_in)
 	}
 	else
 		menu_add(-1, NULL, "(its drive is not plugged in)", NULL);
-	menu_add(ACT_FAV, NULL, fav_index(path) >= 0 ? "Unfavourite" : "Favourite", NULL);
+	menu_add(ACT_FAV, NULL, fav_index(ref) >= 0 ? "Unfavourite" : "Favourite", NULL);
 	menu_add(ACT_CANCEL, NULL, "Cancel", NULL);
 
-	r = UI_driver->fSelect(name, UI_SELECT_POPUP, there ? ACT_RUN : ACT_FAV, menu, NULL);
+	r = UI_driver->fSelect(title, UI_SELECT_POPUP, there ? ACT_RUN : ACT_FAV, menu, NULL);
 	if (r == ACT_RUN)
-		return run_file(path);
+		return run_file(run, ref);
 	if (r == ACT_MOUNT)
-		mount_file(path);
+		mount_file(run);
 	else if (r >= ACT_COPY && r < ACT_COPY + n_sources)
-		copy_file(path, r - ACT_COPY);
+		copy_file(copy, r - ACT_COPY);
 	else if (r == ACT_FAV)
-		toggle_fav(path);
+		toggle_fav(ref);
 	return FALSE;
+}
+
+/* RETURN on a file, a Recent or a Favourites line. */
+static int file_popup(const char *path_in)
+{
+	char path[FILENAME_MAX], zip[FILENAME_MAX], ref[FILENAME_MAX];
+	char entry[ZIP_NAME_MAX], file[FILENAME_MAX], title[40];
+	const char *want;
+
+	Util_strlcpy(path, path_in, sizeof path); /* recent[] changes under us */
+	if (split_zip_ref(path, zip, sizeof zip, &want)) {
+		display_name(path, title, sizeof title);
+		if (!is_regular(zip))
+			return action_popup(NULL, path, zip, title);
+		if (!zip_prepare(zip, want, entry, sizeof entry, file, sizeof file))
+			return FALSE;
+		return action_popup(file, path, zip, title);
+	}
+	if (is_zip(path) && is_regular(path)) {
+		if (!zip_prepare(path, NULL, entry, sizeof entry, file, sizeof file))
+			return FALSE;
+		bang_join(ref, sizeof ref, path, entry);
+		display_name(ref, title, sizeof title);
+		return action_popup(file, ref, path, title);
+	}
+	snprintf(title, sizeof title, "%.36s", base_name(path));
+	return action_popup(is_regular(path) ? path : NULL, path, path, title);
 }
 
 /* ---- the browser ------------------------------------------------------ */

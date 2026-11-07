@@ -104,9 +104,14 @@ stick is its SD card. Wired Ethernet gets an address by DHCP; Wi-Fi is set
 up from the System menu. FujiNet's web UI is reachable on the LAN at
 `http://<laptop>:8000/`. Boot with `atari.nofujinet=1` to not start it.
 
-FujiNet-PC is built from source for musl with two small patches
-(`fujinet/patches/`) and with `DEBUG_NO_REBOOT`, so it survives the Atari's
-cold resets instead of restarting itself.
+FujiNet uses the laptop's network: it is online whenever the laptop has an
+address, over Wi-Fi or Ethernet. CONFIG's Wi-Fi screens scan for and join
+networks with the laptop's Wi-Fi, the same as the F8 System menu does.
+
+FujiNet-PC is built from source for musl with small patches
+(`fujinet/patches/`: musl fixes, the network bridge above) and with
+`DEBUG_NO_REBOOT`, so it survives the Atari's cold resets instead of
+restarting itself.
 
 ## Keys
 
@@ -170,7 +175,11 @@ QEMU_EXTRA="-drive if=none,id=usb2,format=raw,file=build/usb-test.img \
 
 Kernel command-line knobs for debugging: `atari.debug=1` (serial shell,
 `-evdev-debug -kms-debug` on the emulator, emulator exit restarts instead of
-powering off), `atari.noemu=1`, `atari.emudelay=N`, `atari.nomedia=1`.
+powering off), `atari.noemu=1`, `atari.emudelay=N`, `atari.nomedia=1`,
+`atari.hwsim=1` (two virtual Wi-Fi radios via `mac80211_hwsim`, so the
+Wi-Fi menu can be exercised in QEMU against an access point started on
+`wlan1` from the debug shell). `QEMU_NONET=1` starts QEMU without a
+network card.
 
 Two things learned the hard way: fbcon's deferred takeover of a DRM fbdev
 commits over the emulator's scanout, hence `drm_kms_helper.fbdev_emulation=0`

@@ -1,0 +1,462 @@
+diff --git a/lib/bus/sio/NetSIO.cpp b/lib/bus/sio/NetSIO.cpp
+index d2cfbb6a8..3afebb47c 100644
+--- a/lib/bus/sio/NetSIO.cpp
++++ b/lib/bus/sio/NetSIO.cpp
+@@ -63,6 +63,7 @@ void NetSIO::begin(std::string host, int port, int baud)
+ 
+     // Wait for WiFi
+     int suspend_ms = _errcount < 5 ? 400 : 2000;
++#ifdef ESP_PLATFORM
+     if (!fnWiFi.connected())
+     {
+         Debug_println("NetSIO: No WiFi!");
+@@ -70,6 +71,9 @@ void NetSIO::begin(std::string host, int port, int baud)
+         suspend(suspend_ms);
+                 return;
+         }
++#endif
++    // FujiNet-PC: the NetSIO hub is normally the emulator on the same
++    // machine, reachable whether or not the host is online.
+ 
+     //
+     // Connect to hub
+diff --git a/lib/hardware/fnDummyWiFi.cpp b/lib/hardware/fnDummyWiFi.cpp
+index 24c7c546f..f4419cd06 100644
+--- a/lib/hardware/fnDummyWiFi.cpp
++++ b/lib/hardware/fnDummyWiFi.cpp
+@@ -12,9 +12,240 @@
+ #include "httpService.h"
+ #include "led.h"
+ 
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <string>
++#include <thread>
++#include <vector>
++
++#ifndef _WIN32
++#include <arpa/inet.h>
++#include <ifaddrs.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <sys/un.h>
++#include <unistd.h>
++#endif
++
+ // Global object to manage WiFi
+ DummyWiFiManager fnWiFi;
+ 
++/*
++ * atari-os-x86 bridge: when the appliance's PID 1 control socket exists,
++ * the "WiFi" FujiNet sees is the laptop's network. connected() means "the
++ * laptop has an IP address" (Wi-Fi or Ethernet), scans and connects are
++ * forwarded to init, which drives wpa_supplicant (the same requests the F8
++ * System menu makes). Without the socket nothing changes.
++ */
++#define ATARI_CTL_SOCK "/run/atari.ctl"
++#define BRIDGE_STATUS_CACHE_S 2.0
++// The Atari waits about 16 s (DTIMLO 0x0F) for a FujiNet command to
++// complete; stay well below that. CONFIG polls the status afterwards.
++#define BRIDGE_CONNECT_WAIT_S 12
++
++static bool bridge_mode = false;
++
++struct BridgeStatus
++{
++    bool valid = false;
++    double when = 0;
++    std::string ip;      // "ip <addr>"
++    std::string wifi;    // text after "wifi "
++    std::string wifierr; // text after "wifierr "
++};
++static BridgeStatus bridge_st;
++
++struct BridgeNet
++{
++    std::string ssid;
++    int signal;
++    uint8_t encryption;
++};
++static std::vector<BridgeNet> bridge_nets;
++
++static double bridge_now()
++{
++    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++// One request to init: write "<cmd>\n", read the reply until init closes.
++// Returns false when the socket cannot be used.
++static bool bridge_request(const std::string &cmd, std::string &out)
++{
++    out.clear();
++#ifdef _WIN32
++    (void)cmd;
++    return false;
++#else
++    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++    if (fd < 0)
++        return false;
++    struct timeval tv;
++    tv.tv_sec = 3;
++    tv.tv_usec = 0;
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
++    struct sockaddr_un addr;
++    memset(&addr, 0, sizeof(addr));
++    addr.sun_family = AF_UNIX;
++    strlcpy(addr.sun_path, ATARI_CTL_SOCK, sizeof(addr.sun_path));
++    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
++    {
++        close(fd);
++        return false;
++    }
++    std::string line = cmd + "\n";
++    if (write(fd, line.data(), line.size()) != (ssize_t)line.size())
++    {
++        close(fd);
++        return false;
++    }
++    char buf[1024];
++    for (;;)
++    {
++        ssize_t n = read(fd, buf, sizeof(buf));
++        if (n <= 0)
++            break;
++        out.append(buf, (size_t)n);
++        if (out.size() > 65536)
++            break;
++    }
++    close(fd);
++    return true;
++#endif
++}
++
++static bool starts_with(const std::string &s, const char *prefix)
++{
++    return s.compare(0, strlen(prefix), prefix) == 0;
++}
++
++// Calls fn(line) for every line of a reply (without the newline).
++template <typename F>
++static void for_each_line(const std::string &reply, F fn)
++{
++    size_t pos = 0;
++    while (pos < reply.size())
++    {
++        size_t nl = reply.find('\n', pos);
++        std::string line = reply.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
++        if (!line.empty() && line.back() == '\r')
++            line.pop_back();
++        fn(line);
++        if (nl == std::string::npos)
++            break;
++        pos = nl + 1;
++    }
++}
++
++static const BridgeStatus &bridge_status(bool force)
++{
++    double now = bridge_now();
++    if (!force && bridge_st.valid && now - bridge_st.when < BRIDGE_STATUS_CACHE_S)
++        return bridge_st;
++    std::string reply;
++    BridgeStatus st;
++    st.valid = true;
++    st.when = now;
++    if (bridge_request("status", reply))
++    {
++        for_each_line(reply, [&st](const std::string &line) {
++            if (starts_with(line, "ip "))
++                st.ip = line.substr(3);
++            else if (starts_with(line, "wifierr "))
++                st.wifierr = line.substr(8);
++            else if (starts_with(line, "wifi "))
++                st.wifi = line.substr(5);
++        });
++    }
++    bridge_st = st;
++    return bridge_st;
++}
++
++static void bridge_invalidate()
++{
++    bridge_st.valid = false;
++}
++
++// Name of the interface that holds addr, or "".
++static std::string bridge_iface_of(const std::string &ip)
++{
++    std::string name;
++#ifndef _WIN32
++    struct ifaddrs *ifa = nullptr;
++    if (ip.empty() || getifaddrs(&ifa) != 0)
++        return name;
++    for (struct ifaddrs *i = ifa; i != nullptr; i = i->ifa_next)
++    {
++        char a[INET_ADDRSTRLEN];
++        if (i->ifa_addr == nullptr || i->ifa_addr->sa_family != AF_INET)
++            continue;
++        if (inet_ntop(AF_INET, &((struct sockaddr_in *)i->ifa_addr)->sin_addr, a, sizeof(a)) && ip == a)
++        {
++            name = i->ifa_name;
++            break;
++        }
++    }
++    freeifaddrs(ifa);
++#endif
++    return name;
++}
++
++static bool bridge_mac(uint8_t mac[6])
++{
++    std::string iface = bridge_iface_of(bridge_status(false).ip);
++    if (iface.empty() || iface.find('/') != std::string::npos)
++        return false;
++    std::string path = "/sys/class/net/" + iface + "/address";
++    FILE *f = fopen(path.c_str(), "r");
++    if (f == nullptr)
++        return false;
++    unsigned int m[6];
++    int n = fscanf(f, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]);
++    fclose(f);
++    if (n != 6)
++        return false;
++    for (int i = 0; i < 6; i++)
++        mac[i] = (uint8_t)m[i];
++    return true;
++}
++
++// Forward a connect to init and wait (bounded) for the result.
++static int bridge_connect(const char *ssid, const char *password)
++{
++    std::string reply;
++    std::string s = ssid == nullptr ? "" : ssid;
++    std::string cmd = "wifi connect\t" + s + "\t" + (password == nullptr ? "" : password);
++
++    Debug_printf("DummyWiFi (atari-os bridge) connect to SSID \"%s\"\r\n", s.c_str());
++    if (!bridge_request(cmd, reply) || starts_with(reply, "ERR"))
++    {
++        Debug_printf("DummyWiFi (atari-os bridge) connect refused: %s\r\n",
++                     reply.empty() ? "no reply" : reply.c_str());
++        return -1;
++    }
++    for (int i = 0; i < BRIDGE_CONNECT_WAIT_S; i++)
++    {
++        std::this_thread::sleep_for(std::chrono::seconds(1));
++        const BridgeStatus &st = bridge_status(true);
++        if (!st.wifierr.empty())
++        {
++            Debug_printf("DummyWiFi (atari-os bridge) connect failed: %s\r\n", st.wifierr.c_str());
++            return -1;
++        }
++        if (st.wifi == "connected " + s && !st.ip.empty())
++        {
++            Debug_printf("DummyWiFi (atari-os bridge) connected, ip %s\r\n", st.ip.c_str());
++            return 0;
++        }
++    }
++    Debug_printf("DummyWiFi (atari-os bridge) not connected after %d s (%s)\r\n",
++                 BRIDGE_CONNECT_WAIT_S, bridge_st.wifi.c_str());
++    return -1;
++}
++
+ DummyWiFiManager::~DummyWiFiManager()
+ {
+     stop();
+@@ -34,23 +265,38 @@ int DummyWiFiManager::start()
+ {
+ 
+     Debug_println("DummyWiFiManager::start");
++#ifndef _WIN32
++    bridge_mode = access(ATARI_CTL_SOCK, F_OK) == 0;
++#endif
++    if (bridge_mode)
++        Debug_printf("DummyWiFi: atari-os bridge mode, network state from %s\r\n", ATARI_CTL_SOCK);
++    else
++        Debug_printf("DummyWiFi: dummy mode (no %s)\r\n", ATARI_CTL_SOCK);
+     _started = true;
+-    _connected = true;
+-    fnLedManager.set(eLed::LED_WIFI, true);
++    _connected = bridge_mode ? !bridge_status(true).ip.empty() : true;
++    fnLedManager.set(eLed::LED_WIFI, _connected);
+     // fnSystem.Net.start_sntp_client();
+-    fnHTTPD.start();
++    // (bridge: offline now, connected() starts it once the laptop is online)
++    if (_connected)
++        fnHTTPD.start();
+ 
+     return 0;
+ }
+ 
+ int DummyWiFiManager::test_connect(const char *ssid, const char *password)
+ {
++    if (bridge_mode)
++        return connect(ssid, password);
+     return 0;
+ }
+ 
+ // Attempts to connect using information in Config (if any)
+ int DummyWiFiManager::connect()
+ {
++    // Bridge: the laptop's network is already up (or not); init keeps
++    // wpa_supplicant's own config, Config's SSID is left alone.
++    if (bridge_mode)
++        return connected() ? 0 : -1;
+     if (Config.have_wifi_info())
+         return connect(Config.get_wifi_ssid().c_str(), Config.get_wifi_passphrase().c_str());
+     else
+@@ -59,6 +305,18 @@ int DummyWiFiManager::connect()
+ 
+ int DummyWiFiManager::connect(const char *ssid, const char *password)
+ {
++    if (bridge_mode)
++    {
++        if (ssid == nullptr)
++            return connect();
++        int r = bridge_connect(ssid, password);
++        bridge_invalidate();
++        _connected = r == 0;
++        fnLedManager.set(eLed::LED_WIFI, _connected);
++        if (_connected && _started)
++            fnHTTPD.start();
++        return r;
++    }
+     Debug_printf("DummyWiFi connect to SSID \"%s\"\n", ssid == nullptr ? "" : ssid);
+     _connected = true;
+     return 0; // ESP_OK
+@@ -66,6 +324,20 @@ int DummyWiFiManager::connect(const char *ssid, const char *password)
+ 
+ bool DummyWiFiManager::connected()
+ {
++    if (bridge_mode)
++    {
++        bool c = !bridge_status(false).ip.empty();
++        bool changed = c != _connected;
++        _connected = c;
++        if (changed)
++        {
++            Debug_printf("DummyWiFi (atari-os bridge): %s\r\n", c ? "online" : "offline");
++            fnLedManager.set(eLed::LED_WIFI, c);
++            // like IP_EVENT_STA_GOT_IP on the ESP; a no-op when running
++            if (c && _started)
++                fnHTTPD.start();
++        }
++    }
+     return _connected;
+ }
+ 
+@@ -73,11 +345,75 @@ bool DummyWiFiManager::connected()
+ */
+ uint8_t DummyWiFiManager::scan_networks(uint8_t maxresults)
+ {
+-    return 16;
++    if (!bridge_mode)
++        return 16;
++
++    std::string reply;
++    bridge_nets.clear();
++    if (!bridge_request("wifi scan", reply) || starts_with(reply, "ERR"))
++    {
++        Debug_printf("DummyWiFi (atari-os bridge) scan: %s\r\n", reply.empty() ? "no reply" : reply.c_str());
++        return 0;
++    }
++    std::this_thread::sleep_for(std::chrono::seconds(4));
++    if (!bridge_request("wifi results", reply) || starts_with(reply, "ERR"))
++        return 0;
++
++    // "net <signal_dBm> <wpa|wep|open> <ssid...>"
++    for_each_line(reply, [](const std::string &line) {
++        int sig;
++        char kind[16];
++        int consumed = 0;
++        if (sscanf(line.c_str(), "net %d %15s %n", &sig, kind, &consumed) < 2 || consumed <= 0)
++            return;
++        std::string ssid = line.substr((size_t)consumed);
++        if (ssid.empty())
++            return;
++        uint8_t enc = strcmp(kind, "wpa") == 0 ? WIFI_AUTH_WPA2_PSK
++                    : strcmp(kind, "wep") == 0 ? WIFI_AUTH_WEP : WIFI_AUTH_OPEN;
++        for (auto &n : bridge_nets)
++        {
++            if (n.ssid == ssid)
++            {
++                if (sig > n.signal)
++                {
++                    n.signal = sig;
++                    n.encryption = enc;
++                }
++                return;
++            }
++        }
++        bridge_nets.push_back(BridgeNet{ssid, sig, enc});
++    });
++    std::stable_sort(bridge_nets.begin(), bridge_nets.end(),
++                     [](const BridgeNet &a, const BridgeNet &b) { return a.signal > b.signal; });
++    if (bridge_nets.size() > maxresults)
++        bridge_nets.resize(maxresults);
++    Debug_printf("DummyWiFi (atari-os bridge) scan: %u networks\r\n", (unsigned)bridge_nets.size());
++    return (uint8_t)bridge_nets.size();
+ }
+ 
+ int DummyWiFiManager::get_scan_result(uint8_t index, char ssid[32], uint8_t *rssi, uint8_t *channel, char bssid[18], uint8_t *encryption)
+ {
++    if (bridge_mode)
++    {
++        if (ssid != nullptr)
++            memset(ssid, 0, 32);
++        if (index >= bridge_nets.size())
++            return -1;
++        const BridgeNet &n = bridge_nets[index];
++        if (ssid != nullptr)
++            strlcpy(ssid, n.ssid.c_str(), 32);
++        if (bssid != nullptr)
++            strlcpy(bssid, "D0:1C:ED:C0:FF:EE", 18);
++        if (rssi != nullptr)
++            *rssi = (uint8_t)(int8_t)n.signal;
++        if (channel != nullptr)
++            *channel = 0;
++        if (encryption != nullptr)
++            *encryption = n.encryption;
++        return 0;
++    }
+     /*
+     if (index > 1)
+         return -1;
+@@ -103,17 +439,35 @@ int DummyWiFiManager::get_scan_result(uint8_t index, char ssid[32], uint8_t *rss
+ 
+ std::string DummyWiFiManager::get_current_ssid()
+ {
++    if (bridge_mode)
++    {
++        const BridgeStatus &st = bridge_status(false);
++        if (st.ip.empty())
++            return std::string("");
++        if (starts_with(st.wifi, "connected "))
++            return st.wifi.substr(10);
++        return std::string("Ethernet");
++    }
+     return std::string("Dummy Cafe");
+ }
+ 
+ int DummyWiFiManager::get_mac(uint8_t mac[6])
+ {
++    if (bridge_mode && bridge_mac(mac))
++        return 0;
+     memcpy(mac, "\xD0\x1C\xED\xC0\xFF\xEE", 6);
+     return 0; // ESP_OK
+ }
+ 
+ std::string DummyWiFiManager::get_mac_str()
+ {
++    uint8_t mac[6];
++    if (bridge_mode && bridge_mac(mac))
++    {
++        char buf[18];
++        snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
++        return std::string(buf);
++    }
+     return std::string("D0:1C:ED:C0:FF:EE");
+ }
+ 

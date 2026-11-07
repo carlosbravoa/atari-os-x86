@@ -14,6 +14,7 @@
 # stick (scripts/mk-usb-test.sh builds one):
 #   QEMU_EXTRA="-drive if=none,id=usb2,format=raw,file=build/usb-test.img
 #     -device usb-storage,bus=xhci.0,drive=usb2,removable=on" scripts/qemu-test.sh start
+# QEMU_NONET=1 boots without any network card (FujiNet offline checks).
 
 set -eu
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -58,6 +59,8 @@ start)
 	FW=""
 	[ "$MODE" = uefi ] && FW="-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd"
 	ACCEL="-cpu max"; [ -w /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
+	NET="-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8000-:8000,hostfwd=tcp:127.0.0.1:2222-:22 -device e1000e,netdev=n0"
+	[ -n "${QEMU_NONET:-}" ] && NET="-nic none"
 	rm -f "$D"/*.sock "$D"/serial.log
 	# shellcheck disable=SC2086
 	nohup qemu-system-x86_64 $ACCEL $FW -m 1024 -smp 2 -machine q35 \
@@ -65,7 +68,7 @@ start)
 		-drive if=none,id=stick,format=raw,file="$IMG" \
 		-device usb-storage,bus=xhci.0,drive=stick,removable=on \
 		-device usb-kbd -vga std \
-		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8000-:8000,hostfwd=tcp:127.0.0.1:2222-:22 -device e1000e,netdev=n0 \
+		$NET \
 		-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
 		-chardev socket,id=ser,path="$D/serial.sock",server=on,wait=off,logfile="$D/serial.log" \
 		-serial chardev:ser \

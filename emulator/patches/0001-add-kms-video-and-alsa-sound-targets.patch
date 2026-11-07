@@ -91,7 +91,7 @@ index 61d89b4a..24175205 100644
  AM_CONDITIONAL([WITH_SOUND_SDL2], test "$with_sound" = sdl2)
  AM_CONDITIONAL([WITH_SOUND_DOSSB], test "$with_sound" = dossb)
 diff --git a/src/Makefile.am b/src/Makefile.am
-index a1491602..87691d1d 100644
+index a1491602..9d31f9a6 100644
 --- a/src/Makefile.am
 +++ b/src/Makefile.am
 @@ -124,6 +124,9 @@ endif
@@ -104,7 +104,7 @@ index a1491602..87691d1d 100644
  if WITH_SOUND_LIBATARI800
  atari800_SOURCES += sound.c libatari800/sound.c libatari800/sound.h
  endif
-@@ -212,6 +215,15 @@ atari800_SOURCES += \
+@@ -212,6 +215,16 @@ atari800_SOURCES += \
  atari800_SOURCES += pbi_proto80.c pbi_proto80.h af80.c af80.h bit3.c bit3.h
  endif
  
@@ -114,7 +114,8 @@ index a1491602..87691d1d 100644
 +	kms/video.c kms/kms_video.h \
 +	kms/input.c kms/kms_input.h \
 +	kms/sysmenu.c kms/kms_sysmenu.h \
-+	kms/library.c kms/kms_library.h
++	kms/library.c kms/kms_library.h \
++	kms/zipfile.c kms/kms_zipfile.h
 +endif
 +
  if WITH_VIDEO_DOSVGA
