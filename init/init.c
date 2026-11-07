@@ -1313,6 +1313,12 @@ int main(void)
 		start_debug_shell();
 
 	coldplug();
+	{
+		/* System time from the RTC; the kernel only does this itself when
+		   the driver is built in. Network time follows once DHCP is up. */
+		char *hw[] = { BUSYBOX, "hwclock", "-s", "-u", NULL };
+		run(hw);
+	}
 	if (!nomedia)
 		find_media();
 	if (media_mounted)

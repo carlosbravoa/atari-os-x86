@@ -127,6 +127,9 @@ case "$1" in
 		for d in $dns; do echo "nameserver $d" >> /etc/resolv.conf; done
 		[ -n "$domain" ] && echo "search $domain" >> /etc/resolv.conf
 		echo "udhcpc: $interface $ip via ${router:-?} dns ${dns:-?}" > /dev/kmsg
+		# one-shot network time, retried in the background until it works;
+		# the RTC is written back so the next boot starts right
+		[ -e /run/ntp-done ] || (for i in 1 2 3 4 5 6; do busybox ntpd -q -n -p pool.ntp.org >/dev/null 2>&1 && { busybox hwclock -w -u; : > /run/ntp-done; echo "ntp: clock set" > /dev/kmsg; break; }; sleep 20; done) &
 		;;
 esac
 exit 0

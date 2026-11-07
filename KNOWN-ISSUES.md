@@ -9,7 +9,11 @@
 - **Old i3 (Broadwell) laptop**: blurry picture (firmware framebuffer, i915
   probably not taking over) and a firmware "self test" screen after one
   boot. No logs captured yet.
-- **No volume/brightness/lid keys** on the laptop keyboard yet; use the
-  F8 menu.
+- **Lid switch** does nothing yet (volume/brightness keys work).
+- **ZenBook UX425EA reports its battery as absent** (ACPI `BAT0` absent at
+  boot), so the menu shows no battery level there. Not investigated.
+- **Clock**: laptops with a dead CMOS cell boot in 2016; init sets the time
+  from the network once DHCP is up and writes it back to the RTC, but until
+  then TLS (HTTPS hosts in FujiNet) fails.
 - **amdgpu firmware** makes the modloop ~400 MB; per-GPU trimming is
   pending.
