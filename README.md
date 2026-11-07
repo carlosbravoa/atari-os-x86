@@ -145,12 +145,12 @@ release in one evdev read, so the input layer keeps a tap alive for one frame.
 
 ## Status
 
-Runs on real laptops (tested: ASUS ZenBook UX425EA, Tiger Lake: boot to
-emulator in 5.6 s, i915, crisp 4x picture). QEMU-verified: BIOS and UEFI,
-BASIC and FujiNet CONFIG boots, TNFS over the internet, keyboard, menus,
-sound, DHCP, SSH, power button. Wi-Fi association is implemented but still
-to be verified on hardware. Next: laptop keys (lid, volume/brightness
-keys), the media browser, the Altirra core, i686 netbooks.
+Runs on real laptops. Verified on an ASUS ZenBook UX425EA (Tiger Lake):
+boot to emulator in 5.6 s, i915 at 1920x1080 with a 4x picture, SOF audio,
+Wi-Fi from the System menu, SSH, volume/brightness keys, clock sync.
+QEMU-verified: BIOS and UEFI, BASIC and FujiNet CONFIG boots, TNFS over
+the internet, DHCP, power button. Next: the media browser, lid switch,
+the Altirra core, i686 netbooks; see KNOWN-ISSUES.md.
 
 ## Licence
 
