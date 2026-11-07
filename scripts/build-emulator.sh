@@ -34,7 +34,7 @@ if [ ! -f Makefile ] || [ "$SRC/configure" -nt Makefile ]; then
 		--without-readline --without-x \
 		--with-png=no --with-mp3=no --with-zlib=no \
 		--disable-monitorbreak --disable-monitortrace \
-		CFLAGS="-O2 -pipe"
+		CFLAGS="-O2 -pipe -I/work/common"
 fi
 make -j"$(nproc)"
 ls -la src/atari800

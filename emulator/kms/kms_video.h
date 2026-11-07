@@ -35,6 +35,11 @@ void KMS_VIDEO_WriteConfig(FILE *fp);
 void KMS_VIDEO_PaletteUpdate(void);
 void KMS_VIDEO_DisplayScreen(void);
 
+/* Show a line of text in the border for SECONDS (e.g. the F8 hint). */
+void KMS_VIDEO_SetHint(const char *text, double seconds);
+/* Driver name of the DRM device in use ("i915", "simpledrm", ...). */
+extern char KMS_VIDEO_driver[32];
+
 /* Panel dimensions and refresh, available after Initialise. */
 extern int KMS_VIDEO_width;
 extern int KMS_VIDEO_height;

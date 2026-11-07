@@ -15,6 +15,7 @@ extern int KMS_SYSMENU_requested;
 /* Persisted in the emulator config as KMS_VOLUME / KMS_BRIGHTNESS. */
 extern int KMS_SYSMENU_volume;     /* 0..100, -1 = untouched */
 extern int KMS_SYSMENU_brightness; /* 0..100, -1 = untouched */
+extern int KMS_SYSMENU_hint_done;  /* the F8 hint has been shown and used */
 
 void KMS_SYSMENU_Run(void);
 /* Volume/brightness hotkeys (evdev KEY_* codes). */

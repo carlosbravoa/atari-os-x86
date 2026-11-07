@@ -53,15 +53,25 @@ style as the emulator's own, backed by PID 1 over a Unix socket:
 - **Volume** and **Brightness** sliders (persist in the emulator config)
 - **Wi-Fi**: scan, pick a network, type the password; `wpa_supplicant`
   keeps the network in `atari/config/wpa_supplicant.conf`
-- **Remote access (SSH)** on/off, plus IP address and battery
+- **Remote access (SSH)** on/off, **SSH password** (keys only until set)
+- **Hardware status** page: machine, CPU, RAM, video driver and mode,
+  sound card, Wi-Fi, IP, battery, boot medium, kernel
+- **Reboot straight back into Atari** and **Make Atari the default boot**
+  (UEFI `BootNext` / `BootOrder`, so no boot-menu key hunting)
 - Save logs to the stick, restart emulator, reboot, shut down
+
+Boot shows an Atari-style splash with progress lines; the first boots show
+an "F8 = System menu" hint under the picture until the menu is opened once.
+The emulator's own F1 menu has "System" and "Shut down" entries.
 
 ### Remote access
 
-SSH is dropbear, root, keys only, off by default. On first use init
-generates a key pair and writes the private key to the stick:
-`atari/ssh/id_ed25519`. Whoever holds the stick may log in, which is the
-device's trust model. From another machine:
+SSH is dropbear, root, off by default. Keys only until a password is set
+in the System menu (needed when the stick, and the key on it, is in the
+laptop). On first use init generates a key pair and writes the private key
+to the stick: `atari/ssh/id_ed25519`; whoever holds the stick may log in.
+Images built here also authorise the builder's key from `build/ssh/`.
+From another machine:
 
 ```sh
 ssh -i /media/$USER/ATARI/atari/ssh/id_ed25519 root@<ip shown in the menu>

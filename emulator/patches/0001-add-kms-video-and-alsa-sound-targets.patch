@@ -119,3 +119,49 @@ index a1491602..82ec43dd 100644
  if WITH_VIDEO_DOSVGA
  atari800_SOURCES += dos/atari_vga.c dos/vga_gfx.c dos/vga_gfx.h dos/vga_asm.s dos/dos_ints.h
  endif
+diff --git a/src/ui.c b/src/ui.c
+index 5b651bcf..12631227 100644
+--- a/src/ui.c
++++ b/src/ui.c
+@@ -65,6 +65,9 @@
+ #include "statesav.h"
+ #include "sysrom.h"
+ #include "ui.h"
++#ifdef KMS
++#include "kms/kms_sysmenu.h" /* atari-os-x86: the F8 System menu */
++#endif
+ #include "ui_basic.h"
+ #ifdef XEP80_EMULATION
+ #include "xep80.h"
+@@ -4496,11 +4499,19 @@ void UI_Run(void)
+ 		UI_MENU_ACTION(UI_MENU_MONITOR, "About Pocket Atari"),
+ #elif defined(DREAMCAST)
+ 		UI_MENU_ACTION(UI_MENU_MONITOR, "About AtariDC"),
++#else
++#ifdef KMS
++		UI_MENU_ACTION_ACCEL(UI_MENU_MONITOR, "System: FujiNet, Wi-Fi, sound, power", "F8"),
+ #else
+ 		UI_MENU_ACTION_ACCEL(UI_MENU_MONITOR, "Enter Monitor", "F8"),
++#endif
+ #endif
+ 		UI_MENU_ACTION_ACCEL(UI_MENU_ABOUT, "About the Emulator", "Alt+A"),
++#ifdef KMS
++		UI_MENU_ACTION_ACCEL(UI_MENU_EXIT, "Shut down the laptop", "F9"),
++#else
+ 		UI_MENU_ACTION_ACCEL(UI_MENU_EXIT, "Exit Emulator", "F9"),
++#endif
+ 		UI_MENU_END
+ 	};
+ 
+@@ -4629,6 +4640,11 @@ void UI_Run(void)
+ 			AboutEmulator();
+ 			break;
+ 		case UI_MENU_MONITOR:
++#ifdef KMS
++			KMS_SYSMENU_Run();
++			UI_is_active = TRUE; /* back in this menu */
++			break;
++#endif
+ #if defined(_WIN32_WCE)
+ 			AboutPocketAtari();
+ 			break;

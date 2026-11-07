@@ -68,7 +68,7 @@ mkdir -p "$INITRAMFS"/bin "$INITRAMFS"/lib "$INITRAMFS"/usr/bin "$INITRAMFS"/usr
 	"$INITRAMFS"/usr/share/alsa "$INITRAMFS"/proc "$INITRAMFS"/sys "$INITRAMFS"/dev \
 	"$INITRAMFS"/run "$INITRAMFS"/media "$INITRAMFS"/etc "$INITRAMFS"/tmp "$INITRAMFS"/root
 
-gcc -static -Os -Wall -Wextra -o "$INITRAMFS/init" "$WORK/init/init.c"
+gcc -static -Os -Wall -Wextra -I"$WORK/common" -o "$INITRAMFS/init" "$WORK/init/init.c"
 strip "$INITRAMFS/init"
 
 cp "$STAGE/bin/busybox.static" "$INITRAMFS/bin/busybox"

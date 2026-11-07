@@ -35,12 +35,17 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <linux/netlink.h>
+#include <linux/fs.h>
+#include <drm/drm.h>
+#include <drm/drm_mode.h>
+#include "font_atari.h"
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <linux/input.h>
@@ -85,7 +90,10 @@ static char wifi_iface[32] = "";
 static struct {
 	int fujinet_boot; /* emulator boots through FujiNet (-netsio) */
 	int ssh;          /* dropbear running */
-} conf = { 0, 0 };
+	char rootpw[160]; /* crypt(3) hash, empty = keys only */
+} conf = { 0, 0, "" };
+static int efi_ok = 0;
+static char media_kind[32] = "none";
 
 /* ---- logging --------------------------------------------------------- */
 
@@ -233,11 +241,23 @@ static int run_output(char *const argv[], char *buf, size_t size)
 
 static void load_sysconf(void)
 {
-	char buf[256];
+	char buf[512];
 	if (read_file(SYSCONF, buf, sizeof buf) < 0)
 		return;
+	(void)0;
 	conf.fujinet_boot = strstr(buf, "fujinet=1") != NULL;
 	conf.ssh = strstr(buf, "ssh=1") != NULL;
+	{
+		char *p = strstr(buf, "rootpw=");
+		if (p) {
+			char *e;
+			p += 7;
+			e = strchr(p, '\n');
+			if (e)
+				*e = '\0';
+			snprintf(conf.rootpw, sizeof conf.rootpw, "%s", p);
+		}
+	}
 }
 
 static void save_sysconf(void)
@@ -248,7 +268,7 @@ static void save_sysconf(void)
 	f = fopen(SYSCONF, "w");
 	if (!f)
 		return;
-	fprintf(f, "fujinet=%d\nssh=%d\n", conf.fujinet_boot, conf.ssh);
+	fprintf(f, "fujinet=%d\nssh=%d\nrootpw=%s\n", conf.fujinet_boot, conf.ssh, conf.rootpw);
 	fclose(f);
 }
 
@@ -256,6 +276,209 @@ static void sleep_ms(int ms)
 {
 	struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
 	nanosleep(&ts, NULL);
+}
+
+/* ---- boot splash ------------------------------------------------------- */
+
+/* A few lines of Atari-font text on whatever DRM device the firmware left
+   us, so the screen is not black while drivers load. Released before the
+   emulator starts; re-created after the native GPU driver replaces the
+   firmware framebuffer. */
+static struct {
+	int fd;
+	uint32_t crtc, conn, fb, handle, w, h, pitch;
+	uint64_t size;
+	uint8_t *map;
+	struct drm_mode_modeinfo mode;
+	int nlines;
+	char lines[10][64];
+} splash = { .fd = -1 };
+
+#define SPLASH_BG 0x00001a4a
+#define SPLASH_FG 0x009ad6ff
+
+static void splash_text(int x, int y, int scale, const char *text, uint32_t color)
+{
+	for (; *text; text++, x += 8 * scale) {
+		int c = (unsigned char)*text;
+		const unsigned char *g;
+		int gy, gx, sy, sx;
+		if (c < 32 || c > 127)
+			c = 32;
+		g = font_atari + (c < 96 ? c - 32 : c) * 8;
+		for (gy = 0; gy < 8; gy++)
+			for (gx = 0; gx < 8; gx++) {
+				if (!(g[gy] & (0x80 >> gx)))
+					continue;
+				for (sy = 0; sy < scale; sy++)
+					for (sx = 0; sx < scale; sx++) {
+						uint32_t px = x + gx * scale + sx, py = y + gy * scale + sy;
+						if (px < splash.w && py < splash.h)
+							*(uint32_t *)(splash.map + py * splash.pitch + px * 4) = color;
+					}
+			}
+	}
+}
+
+static void splash_redraw(void)
+{
+	int i, y;
+	uint32_t x, yy;
+	if (splash.fd < 0)
+		return;
+	for (yy = 0; yy < splash.h; yy++)
+		for (x = 0; x < splash.w; x++)
+			*(uint32_t *)(splash.map + yy * splash.pitch + x * 4) = SPLASH_BG;
+	splash_text(64, 48, 3, "atari-os-x86", SPLASH_FG);
+	y = 48 + 24 + 24;
+	for (i = 0; i < splash.nlines; i++, y += 20)
+		splash_text(64, y, 2, splash.lines[i], SPLASH_FG);
+	/* Shadow-buffered drivers (simpledrm, bochs) only show changes on a
+	   commit: mark the whole framebuffer dirty. */
+	if (splash.fb) {
+		struct drm_mode_fb_dirty_cmd dirty;
+		memset(&dirty, 0, sizeof dirty);
+		dirty.fb_id = splash.fb;
+		ioctl(splash.fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
+	}
+}
+
+static void splash_close(void)
+{
+	if (splash.fd < 0)
+		return;
+	if (splash.map)
+		munmap(splash.map, splash.size);
+	if (splash.fb)
+		ioctl(splash.fd, DRM_IOCTL_MODE_RMFB, &splash.fb);
+	if (splash.handle) {
+		struct drm_mode_destroy_dumb d = { splash.handle };
+		ioctl(splash.fd, DRM_IOCTL_MODE_DESTROY_DUMB, &d);
+	}
+	close(splash.fd);
+	splash.fd = -1;
+	splash.map = NULL;
+	splash.fb = splash.handle = 0;
+}
+
+static int splash_try_card(const char *path)
+{
+	struct drm_mode_card_res res;
+	uint32_t conns[16], crtcs[16], encs[16];
+	struct drm_mode_get_connector conn;
+	struct drm_mode_modeinfo modes[32];
+	struct drm_mode_get_encoder enc;
+	struct drm_mode_create_dumb creq;
+	struct drm_mode_fb_cmd fb;
+	struct drm_mode_map_dumb mreq;
+	struct drm_mode_crtc crtc;
+	unsigned i;
+	int fd = open(path, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	memset(&res, 0, sizeof res);
+	res.connector_id_ptr = (uintptr_t)conns; res.count_connectors = 16;
+	res.crtc_id_ptr = (uintptr_t)crtcs; res.count_crtcs = 16;
+	res.encoder_id_ptr = (uintptr_t)encs; res.count_encoders = 16;
+	if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0 || res.count_connectors == 0 || res.count_crtcs == 0) {
+		logmsg("splash: %s: getresources: %s (%u conns, %u crtcs)", path, strerror(errno), res.count_connectors, res.count_crtcs);
+		goto fail;
+	}
+	for (i = 0; i < res.count_connectors && i < 16; i++) {
+		/* First call with count_modes == 0 makes the kernel probe the
+		   connector (that is what libdrm does); the second fetches modes. */
+		memset(&conn, 0, sizeof conn);
+		conn.connector_id = conns[i];
+		if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0)
+			continue;
+		if (conn.connection != 1 || conn.count_modes == 0)
+			continue;
+		conn.modes_ptr = (uintptr_t)modes;
+		if (conn.count_modes > 32)
+			conn.count_modes = 32;
+		conn.count_props = conn.count_encoders = 0;
+		if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0)
+			continue;
+		if (conn.count_modes > 0)
+			break;
+	}
+	if (i >= res.count_connectors || i >= 16) {
+		logmsg("splash: %s: no connected connector with modes", path);
+		goto fail;
+	}
+	splash.conn = conns[i];
+	splash.mode = modes[0];
+	splash.crtc = crtcs[0];
+	if (conn.encoder_id) {
+		memset(&enc, 0, sizeof enc);
+		enc.encoder_id = conn.encoder_id;
+		if (ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &enc) == 0 && enc.crtc_id)
+			splash.crtc = enc.crtc_id;
+	}
+	memset(&creq, 0, sizeof creq);
+	creq.width = splash.mode.hdisplay; creq.height = splash.mode.vdisplay; creq.bpp = 32;
+	if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq) < 0) {
+		logmsg("splash: %s: create_dumb: %s", path, strerror(errno));
+		goto fail;
+	}
+	splash.fd = fd;
+	splash.handle = creq.handle; splash.pitch = creq.pitch; splash.size = creq.size;
+	splash.w = creq.width; splash.h = creq.height;
+	memset(&fb, 0, sizeof fb);
+	fb.width = creq.width; fb.height = creq.height; fb.pitch = creq.pitch;
+	fb.bpp = 32; fb.depth = 24; fb.handle = creq.handle;
+	if (ioctl(fd, DRM_IOCTL_MODE_ADDFB, &fb) < 0) {
+		logmsg("splash: addfb: %s", strerror(errno));
+		goto fail2;
+	}
+	splash.fb = fb.fb_id;
+	memset(&mreq, 0, sizeof mreq);
+	mreq.handle = creq.handle;
+	if (ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq) < 0)
+		goto fail2;
+	splash.map = mmap(0, splash.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mreq.offset);
+	if (splash.map == MAP_FAILED) {
+		splash.map = NULL;
+		goto fail2;
+	}
+	splash_redraw();
+	memset(&crtc, 0, sizeof crtc);
+	crtc.crtc_id = splash.crtc; crtc.fb_id = splash.fb;
+	crtc.set_connectors_ptr = (uintptr_t)&splash.conn; crtc.count_connectors = 1;
+	crtc.mode = splash.mode; crtc.mode_valid = 1;
+	if (ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &crtc) < 0) {
+		logmsg("splash: setcrtc: %s", strerror(errno));
+		goto fail2;
+	}
+	return 1;
+fail2:
+	splash_close();
+	return 0;
+fail:
+	close(fd);
+	return 0;
+}
+
+static void splash_open(void)
+{
+	char path[32];
+	int i;
+	splash_close();
+	for (i = 0; i < 4; i++) {
+		snprintf(path, sizeof path, "/dev/dri/card%d", i);
+		if (splash_try_card(path)) {
+			logmsg("splash on %s, %ux%u", path, splash.w, splash.h);
+			return;
+		}
+	}
+	logmsg("splash: no usable DRM device yet");
+}
+
+static void splash_line(const char *text)
+{
+	if (splash.nlines < 10)
+		snprintf(splash.lines[splash.nlines++], 64, "%s", text);
+	splash_redraw();
 }
 
 /* ---- modules ---------------------------------------------------------- */
@@ -457,6 +680,8 @@ static void find_media(void)
 	while (waited < MEDIA_WAIT_S * 1000) {
 		if (scan_block_devices()) {
 			media_mounted = 1;
+			if (strcmp(media_kind, "none") == 0)
+				snprintf(media_kind, sizeof media_kind, "stick");
 			logmsg("boot media mounted after %d ms", waited);
 			return;
 		}
@@ -540,6 +765,7 @@ static int try_image_file(const char *dev)
 			          "flush,shortname=mixed,errors=continue") == 0) {
 				if (exists(MODLOOP_IMG)) {
 					logmsg("using image file %s on %s (%s)", e->d_name, dev, fstypes[i]);
+					snprintf(media_kind, sizeof media_kind, "image-file");
 					found = 1;
 				}
 				else
@@ -689,6 +915,17 @@ static void start_fujinet(void)
 
 /* ---- SSH (dropbear) ---------------------------------------------------- */
 
+/* /etc/shadow lives in the initramfs; the hash is kept in system.conf. */
+static void apply_rootpw(void)
+{
+	FILE *f = fopen("/etc/shadow", "w");
+	if (!f)
+		return;
+	fprintf(f, "root:%s:0:0:99999:7:::\n", conf.rootpw[0] ? conf.rootpw : "!");
+	fclose(f);
+	chmod("/etc/shadow", 0600);
+}
+
 /* Keys live on the stick: a host key so clients don't see a new identity
    every boot, and a client key pair generated on first use whose private
    half is written to the stick in OpenSSH format. Holding the stick means
@@ -772,8 +1009,11 @@ static void ssh_start(void)
 			dup2(null, 2);
 		}
 		setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
-		/* -F foreground, -s no password logins, -r host key */
-		execl("/usr/sbin/dropbear", "dropbear", "-F", "-s", "-r", host, (char *)NULL);
+		/* -F foreground, -r host key, -s (no password logins) unless one is set */
+		if (conf.rootpw[0])
+			execl("/usr/sbin/dropbear", "dropbear", "-F", "-r", host, (char *)NULL);
+		else
+			execl("/usr/sbin/dropbear", "dropbear", "-F", "-s", "-r", host, (char *)NULL);
 		_exit(127);
 	}
 	logmsg("ssh: dropbear started, pid %d", (int)ssh_pid);
@@ -899,6 +1139,94 @@ static void start_debug_shell(void)
 	}
 }
 
+/* ---- EFI boot order ---------------------------------------------------------- */
+
+#define EFIVARS "/sys/firmware/efi/efivars"
+#define EFI_GLOBAL "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+
+static int efi_read(const char *name, uint8_t *data, size_t size)
+{
+	char path[200];
+	int fd;
+	ssize_t n;
+	snprintf(path, sizeof path, EFIVARS "/%s-" EFI_GLOBAL, name);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	n = read(fd, data, size);
+	close(fd);
+	return n < 4 ? -1 : (int)(n - 4); /* strip the 4-byte attributes */
+}
+
+static int efi_write(const char *name, const uint8_t *data, size_t len)
+{
+	char path[200];
+	uint8_t buf[4 + 256];
+	int fd, attr;
+	if (len > 256)
+		return -1;
+	snprintf(path, sizeof path, EFIVARS "/%s-" EFI_GLOBAL, name);
+	/* efivarfs marks existing variables immutable; clear that first */
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		if (ioctl(fd, FS_IOC_GETFLAGS, &attr) == 0 && (attr & FS_IMMUTABLE_FL)) {
+			attr &= ~FS_IMMUTABLE_FL;
+			ioctl(fd, FS_IOC_SETFLAGS, &attr);
+		}
+		close(fd);
+	}
+	buf[0] = 0x07; buf[1] = buf[2] = buf[3] = 0; /* NV | BS | RT */
+	memcpy(buf + 4, data, len);
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0)
+		return -1;
+	if (write(fd, buf, len + 4) != (ssize_t)(len + 4)) {
+		close(fd);
+		return -1;
+	}
+	close(fd);
+	return 0;
+}
+
+static void efi_setup(void)
+{
+	uint8_t cur[8];
+	if (!exists("/sys/firmware/efi"))
+		return;
+	mount("efivarfs", EFIVARS, "efivarfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+	efi_ok = efi_read("BootCurrent", cur, sizeof cur) >= 2;
+}
+
+/* Boot this same entry once more on the next start (no boot menu key). */
+static int efi_bootnext(void)
+{
+	uint8_t cur[8];
+	if (!efi_ok || efi_read("BootCurrent", cur, sizeof cur) < 2)
+		return -1;
+	return efi_write("BootNext", cur + 4, 2);
+}
+
+/* Move the current entry to the front of BootOrder. */
+static int efi_bootdefault(void)
+{
+	uint8_t cur[8], order[4 + 256], neworder[256];
+	int n, i, k = 0;
+	if (!efi_ok || efi_read("BootCurrent", cur, sizeof cur) < 2)
+		return -1;
+	n = efi_read("BootOrder", order, sizeof order);
+	if (n < 2)
+		return -1;
+	neworder[k++] = cur[4]; neworder[k++] = cur[5];
+	for (i = 0; i + 1 < n; i += 2) {
+		if (order[4 + i] == cur[4] && order[5 + i] == cur[5])
+			continue;
+		if (k + 2 > (int)sizeof neworder)
+			break;
+		neworder[k++] = order[4 + i]; neworder[k++] = order[5 + i];
+	}
+	return efi_write("BootOrder", neworder, k);
+}
+
 /* ---- control socket ------------------------------------------------------- */
 
 static void shutdown_machine(int how);
@@ -942,8 +1270,9 @@ static void cmd_status(int fd)
 	char buf[2048], line[300], val[128];
 	char *p;
 
-	snprintf(line, sizeof line, "fujinet %s\nssh %s\n",
-	         fujinet_enabled && conf.fujinet_boot ? "on" : "off", ssh_pid > 0 ? "on" : "off");
+	snprintf(line, sizeof line, "fujinet %s\nssh %s\npassword %s\nefi %s\nmedia %s\n",
+	         fujinet_enabled && conf.fujinet_boot ? "on" : "off", ssh_pid > 0 ? "on" : "off",
+	         conf.rootpw[0] ? "set" : "none", efi_ok ? "yes" : "no", media_kind);
 	reply(fd, line);
 
 	/* first non-loopback IPv4 address */
@@ -1132,6 +1461,32 @@ static void ctl_handle(int fd)
 		}
 		reply(fd, "OK\n");
 	}
+	else if (strncmp(line, "password ", 9) == 0) {
+		const char *pw = line + 9;
+		if (strcmp(pw, "clear") == 0 || pw[0] == '\0')
+			conf.rootpw[0] = '\0';
+		else {
+			char *argv[] = { BUSYBOX, "cryptpw", "-m", "sha512", (char *)pw, NULL };
+			char hash[200];
+			if (run_output(argv, hash, sizeof hash) != 0 || hash[0] != '$') {
+				reply(fd, "ERR could not hash the password\n");
+				return;
+			}
+			hash[strcspn(hash, "\n")] = '\0';
+			snprintf(conf.rootpw, sizeof conf.rootpw, "%.159s", hash);
+		}
+		save_sysconf();
+		apply_rootpw();
+		if (ssh_pid > 0) { /* restart so the password policy changes */
+			ssh_stop();
+			ssh_start();
+		}
+		reply(fd, "OK\n");
+	}
+	else if (strcmp(line, "bootnext") == 0)
+		reply(fd, efi_bootnext() == 0 ? "OK\n" : "ERR not booted from UEFI\n");
+	else if (strcmp(line, "bootdefault") == 0)
+		reply(fd, efi_bootdefault() == 0 ? "OK\n" : "ERR not booted from UEFI\n");
 	else if (strcmp(line, "logs") == 0) {
 		save_logs();
 		reply(fd, "OK\n");
@@ -1308,6 +1663,8 @@ int main(void)
 
 	write_file("/proc/sys/kernel/printk", debug ? "7 4 1 7" : "3 3 1 3");
 	write_file("/proc/sys/kernel/modprobe", "/bin/modprobe");
+	splash_open();
+	splash_line("Loading drivers...");
 
 	if (debug)
 		start_debug_shell();
@@ -1321,6 +1678,7 @@ int main(void)
 	}
 	if (!nomedia)
 		find_media();
+	splash_line(media_mounted ? "Stick found" : "No stick: built-in system");
 	if (media_mounted)
 		mount_modloop();
 	/* With the full module set: GPU, sound, network, odd input devices.
@@ -1328,11 +1686,17 @@ int main(void)
 	   while it runs are not lost. */
 	uevent_open();
 	coldplug();
+	/* The native GPU driver may have replaced the firmware framebuffer. */
+	splash_open();
+	splash_line("Hardware ready");
+	efi_setup();
 	open_buttons();
 
 	load_sysconf();
+	apply_rootpw();
 	ctl_open();
 	start_network();
+	splash_line("Network starting");
 	fujinet_enabled = !nofujinet && exists(FUJINET_BIN);
 	if (fujinet_enabled)
 		start_fujinet();
@@ -1343,6 +1707,9 @@ int main(void)
 		logmsg("waiting %d s before starting the emulator", emudelay);
 		sleep_ms(emudelay * 1000);
 	}
+	splash_line("Starting the Atari");
+	sleep_ms(300);
+	splash_close(); /* the emulator takes the display from here */
 	if (!noemu)
 		start_emulator();
 

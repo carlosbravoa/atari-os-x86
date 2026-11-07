@@ -50,9 +50,14 @@
 #include "screen.h"
 #include "util.h"
 #include "kms/kms_video.h"
+#include "font_atari.h"
 
 int KMS_VIDEO_scale_mode = KMS_SCALE_INTEGER;
 char KMS_VIDEO_device[256] = "";
+char KMS_VIDEO_driver[32] = "?";
+static char hint_text[80] = "";
+static double hint_until = 0;
+static int hint_clear_frames = 0;
 int KMS_VIDEO_width = 0;
 int KMS_VIDEO_height = 0;
 double KMS_VIDEO_refresh = 60.0;
@@ -251,7 +256,14 @@ static int open_card(const char *path)
 	}
 	drmModeFreeResources(res);
 	drmSetMaster(fd); /* best effort; we are usually the only client */
-	Log_print("kms: using %s, %dx%d@%d", path, mode.hdisplay, mode.vdisplay, mode.vrefresh);
+	{
+		drmVersionPtr v = drmGetVersion(fd);
+		if (v) {
+			Util_strlcpy(KMS_VIDEO_driver, v->name ? v->name : "?", sizeof KMS_VIDEO_driver);
+			drmFreeVersion(v);
+		}
+	}
+	Log_print("kms: using %s (%s), %dx%d@%d", path, KMS_VIDEO_driver, mode.hdisplay, mode.vdisplay, mode.vrefresh);
 	return TRUE;
 }
 
@@ -488,6 +500,65 @@ void KMS_VIDEO_PaletteUpdate(void)
 		palette[i] = (uint32_t)Colours_table[i] & 0x00ffffffu; /* XRGB8888 */
 }
 
+/* ---- hint overlay ------------------------------------------------------ */
+
+void KMS_VIDEO_SetHint(const char *text, double seconds)
+{
+	Util_strlcpy(hint_text, text, sizeof hint_text);
+	hint_until = Util_time() + seconds;
+	hint_clear_frames = 0;
+}
+
+/* Text in the black border below (or above) the picture, Atari font at
+   2x, centred. The band is cleared for a few frames once the hint ends
+   so both buffers are clean again. */
+static void draw_hint(struct dumb_fb *fb)
+{
+	int scale = 2, band = 8 * scale + 8;
+	int y0, x0, len, i;
+	int active = hint_text[0] && Util_time() < hint_until;
+
+	if (!active) {
+		if (hint_clear_frames <= 0)
+			return;
+		hint_clear_frames--;
+	}
+	if ((int)mode.vdisplay - (dst_y + dst_h) >= band)
+		y0 = dst_y + dst_h + 4;
+	else if (dst_y >= band)
+		y0 = dst_y - band + 4;
+	else
+		return;
+	for (i = 0; i < 8 * scale; i++)
+		memset(fb->map + (size_t)(y0 + i) * fb->pitch, 0, (size_t)mode.hdisplay * 4);
+	if (!active)
+		return;
+	hint_clear_frames = 3;
+	len = (int)strlen(hint_text);
+	x0 = ((int)mode.hdisplay - len * 8 * scale) / 2;
+	if (x0 < 0)
+		x0 = 0;
+	for (i = 0; i < len; i++) {
+		int c = (unsigned char)hint_text[i], gy, gx, sy, sx;
+		const unsigned char *g;
+		if (c < 32 || c > 127)
+			c = 32;
+		g = font_atari + (c < 96 ? c - 32 : c) * 8;
+		for (gy = 0; gy < 8; gy++)
+			for (gx = 0; gx < 8; gx++) {
+				if (!(g[gy] & (0x80 >> gx)))
+					continue;
+				for (sy = 0; sy < scale; sy++)
+					for (sx = 0; sx < scale; sx++) {
+						int px = x0 + i * 8 * scale + gx * scale + sx;
+						int py = y0 + gy * scale + sy;
+						if (px >= 0 && px < (int)mode.hdisplay)
+							*(uint32_t *)(fb->map + (size_t)py * fb->pitch + (size_t)px * 4) = 0x00ffffff;
+					}
+			}
+	}
+}
+
 /* ---- rendering ------------------------------------------------------- */
 
 static void render(struct dumb_fb *fb)
@@ -565,6 +636,7 @@ void KMS_VIDEO_DisplayScreen(void)
 	wait_flip();
 	back = 1 - front;
 	render(&fbs[back]);
+	draw_hint(&fbs[back]);
 	st_frames++;
 	if (debug_stats) {
 		double now = Util_time();
