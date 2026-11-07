@@ -214,6 +214,23 @@ interface_branding: atari-os-x86
     module_path: boot():/atari-os/initramfs
     cmdline: loglevel=7 console=ttyS0,115200 drm_kms_helper.fbdev_emulation=0 atari.debug=1
 EOF
+# A developer key, generated once under build/ssh/, is authorised on every
+# image built here, so the builder can reach a laptop as soon as SSH is
+# switched on in the F8 menu (the laptop still generates its own key for
+# the stick holder when this file is absent).
+if [ ! -f "$BUILD/ssh/id_ed25519" ]; then
+	mkdir -p "$BUILD/ssh"
+	dropbearkey -t ed25519 -f "$BUILD/ssh/id_ed25519.dropbear" >/dev/null 2>&1 \
+		&& dropbearconvert dropbear openssh "$BUILD/ssh/id_ed25519.dropbear" "$BUILD/ssh/id_ed25519" >/dev/null 2>&1 \
+		&& dropbearkey -y -f "$BUILD/ssh/id_ed25519.dropbear" 2>/dev/null | grep '^ssh-ed25519' > "$BUILD/ssh/id_ed25519.pub" \
+		&& chmod 600 "$BUILD/ssh/id_ed25519" || rm -f "$BUILD/ssh/id_ed25519"
+fi
+if [ -f "$BUILD/ssh/id_ed25519.pub" ]; then
+	mkdir -p "$STICK/atari/ssh"
+	cp "$BUILD/ssh/id_ed25519.pub" "$STICK/atari/ssh/authorized_keys"
+	log "Developer SSH key authorised (build/ssh/id_ed25519)"
+fi
+
 cat > "$STICK/atari/README.txt" <<'EOF'
 atari-os-x86 - this stick boots an Atari 8-bit computer.
 
