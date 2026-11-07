@@ -1,0 +1,43 @@
+/*
+ * kms/video.h - DRM/KMS dumb-buffer video backend for Atari800
+ *
+ * Part of atari-os-x86: Atari800 running directly on Linux DRM/KMS,
+ * ALSA and evdev with no display server or SDL in between.
+ *
+ * This file is part of the Atari800 emulator project which emulates
+ * the Atari 400, 800, 800XL, 130XE, and 5200 8-bit computers.
+ *
+ * Atari800 is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ */
+#ifndef KMS_KMS_KMS_VIDEO_H_
+#define KMS_KMS_KMS_VIDEO_H_
+
+#include <stdio.h>
+
+/* How the 336x240 Atari picture is placed on the panel. */
+enum {
+	KMS_SCALE_INTEGER, /* largest integer factor that fits, same on both axes (default) */
+	KMS_SCALE_FIT,     /* fill the height, 4:3 width, fractional nearest-neighbour */
+	KMS_SCALE_STRETCH  /* fill the whole panel */
+};
+
+extern int KMS_VIDEO_scale_mode;
+/* Preferred DRM node ("" = probe /dev/dri/card*). */
+extern char KMS_VIDEO_device[256];
+
+int KMS_VIDEO_Initialise(int *argc, char *argv[]);
+void KMS_VIDEO_Exit(void);
+int KMS_VIDEO_ReadConfig(char *option, char *parameters);
+void KMS_VIDEO_WriteConfig(FILE *fp);
+void KMS_VIDEO_PaletteUpdate(void);
+void KMS_VIDEO_DisplayScreen(void);
+
+/* Panel dimensions and refresh, available after Initialise. */
+extern int KMS_VIDEO_width;
+extern int KMS_VIDEO_height;
+extern double KMS_VIDEO_refresh;
+
+#endif /* KMS_KMS_KMS_VIDEO_H_ */

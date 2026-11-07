@@ -1,0 +1,6 @@
+[submodule "third_party/atari800"]
+	path = third_party/atari800
+	url = https://github.com/atari800/atari800.git
+[submodule "third_party/fujinet-firmware"]
+	path = third_party/fujinet-firmware
+	url = https://github.com/FujiNetWIFI/fujinet-firmware.git
