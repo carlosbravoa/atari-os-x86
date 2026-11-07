@@ -90,7 +90,7 @@ apk add --root "$STAGE" --initdb --no-scripts --no-cache \
 	--keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories \
 	linux-lts musl busybox-static alsa-lib libdrm \
 	expat libcrypto3 zlib libstdc++ libgcc ca-certificates-bundle \
-	wpa_supplicant iw dropbear dropbear-convert $FIRMWARE_PKGS >/dev/null
+	wpa_supplicant iw dropbear dropbear-convert sfdisk dosfstools $FIRMWARE_PKGS >/dev/null
 fi
 KVER=$(ls "$STAGE/lib/modules")
 [ -n "$KVER" ] || die "no kernel modules in stage"
@@ -192,6 +192,14 @@ cp "$STAGE/usr/sbin/dropbear" "$INITRAMFS/usr/sbin/"
 cp "$STAGE/usr/bin/dropbearkey" "$STAGE/usr/bin/dropbearconvert" "$INITRAMFS/usr/bin/"
 copy_deps "$INITRAMFS/sbin/wpa_supplicant" "$INITRAMFS/sbin/wpa_cli" "$INITRAMFS/usr/sbin/iw" "$INITRAMFS/usr/sbin/dropbear" \
 	"$INITRAMFS/usr/bin/dropbearkey" "$INITRAMFS/usr/bin/dropbearconvert"
+# The installer (F8 "Install onto this laptop's disk"): sfdisk, mkfs.vfat
+# and the limine CLI for the MBR. limine comes from this build environment,
+# not the stage: it is the same package whose limine-bios.sys and
+# BOOTX64.EFI go onto the stick (step 4), and bios-install must match them.
+cp "$STAGE/sbin/sfdisk" "$STAGE/sbin/mkfs.fat" "$INITRAMFS/sbin/"
+ln -sf mkfs.fat "$INITRAMFS/sbin/mkfs.vfat"
+cp /usr/bin/limine "$INITRAMFS/usr/bin/limine"
+copy_deps "$INITRAMFS/sbin/sfdisk" "$INITRAMFS/sbin/mkfs.fat" "$INITRAMFS/usr/bin/limine"
 # dropbear needs an account database for root
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$INITRAMFS/etc/passwd"
 printf 'root:x:0:\n' > "$INITRAMFS/etc/group"

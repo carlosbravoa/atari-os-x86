@@ -23,6 +23,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -365,7 +366,7 @@ static void hardware_page(const char *status)
 		add_line(page, &n, sizeof page, "Battery: %s%%", v);
 	status_get(status, "media", v, sizeof v, "?");
 	status_get(status, "efi", w, sizeof w, "?");
-	add_line(page, &n, sizeof page, "Stick: %s, UEFI %s", v, w);
+	add_line(page, &n, sizeof page, "Media: %s, UEFI %s", v, w);
 	boot_of(status, v, sizeof v);
 	status_get(status, "ssh", w, sizeof w, "?");
 	add_line(page, &n, sizeof page, "Boot: %s, SSH %s", boot_label(v), w);
@@ -453,19 +454,15 @@ static void wait_seconds(double s)
 	}
 }
 
-/* fMessage shows one 38-column line; longer texts (an ERR reply from
-   init) go to an info page, word-wrapped. */
-static void long_message(const char *text)
+/* An info page with TEXT word-wrapped to 36 columns; a '\n' in TEXT
+   starts a new paragraph (after an empty line). */
+static void wrapped_page(const char *title, const char *text)
 {
-	static char page[512];
+	static char page[1024];
 	size_t n = 0;
 	const char *p = text;
-	if (strlen(text) <= 38) {
-		UI_driver->fMessage(text, TRUE);
-		return;
-	}
 	while (*p && n + 40 < sizeof page) {
-		size_t len = strlen(p);
+		size_t len = strcspn(p, "\n");
 		if (len > 36) {
 			len = 36;
 			while (len > 0 && p[len] != ' ')
@@ -479,10 +476,24 @@ static void long_message(const char *text)
 		p += len;
 		while (*p == ' ')
 			p++;
+		if (*p == '\n') {
+			page[n++] = '\0'; /* empty line between paragraphs */
+			p++;
+		}
 	}
 	page[n++] = '\n';
 	page[n] = '\0';
-	UI_driver->fInfoScreen("Wi-Fi", page);
+	UI_driver->fInfoScreen(title, page);
+}
+
+/* fMessage shows one 38-column line; longer texts (an ERR reply from
+   init) go to an info page, word-wrapped. */
+static void long_message(const char *text)
+{
+	if (strlen(text) <= 38)
+		UI_driver->fMessage(text, TRUE);
+	else
+		wrapped_page("Wi-Fi", text);
 }
 
 /* After "wifi connect": poll the status once a second for up to 20 s,
@@ -687,6 +698,166 @@ static void tv_menu(void)
 	UI_driver->fMessage(line, TRUE);
 }
 
+/* ---- install onto the laptop's disk ------------------------------------ */
+
+/* "500 GB", "8.6 GB", "1.0 TB" (decimal, as disks are sold) */
+static void size_label(char *out, size_t size, const char *bytes)
+{
+	double b = strtod(bytes, NULL);
+	if (b >= 1e12)
+		snprintf(out, size, "%.1f TB", b / 1e12);
+	else if (b >= 10e9)
+		snprintf(out, size, "%.0f GB", b / 1e9);
+	else
+		snprintf(out, size, "%.1f GB", b / 1e9);
+}
+
+/* Send "install <disk>" and follow init's report: "step <text>" and
+   "progress <pct>" lines update the message line until "OK" (TRUE) or
+   "ERR <text>" (FALSE, the text in err). */
+static int install_stream(const char *cmd, char *err, size_t size)
+{
+	struct sockaddr_un addr;
+	char buf[1024], step[64], line[96];
+	size_t used = 0;
+	int fd, result = -1;
+
+	Util_strlcpy(err, "the installer stopped unexpectedly", size);
+	step[0] = '\0';
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return FALSE;
+	memset(&addr, 0, sizeof addr);
+	addr.sun_family = AF_UNIX;
+	Util_strlcpy(addr.sun_path, CTL_SOCK, sizeof addr.sun_path);
+	if (connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0
+	    || write(fd, cmd, strlen(cmd)) < 0 || write(fd, "\n", 1) < 0) {
+		close(fd);
+		Util_strlcpy(err, "no control socket", size);
+		return FALSE;
+	}
+	while (result < 0) {
+		struct pollfd pfd;
+		ssize_t got;
+		char *nl;
+		pfd.fd = fd;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		if (poll(&pfd, 1, 100) <= 0) {
+			PLATFORM_Keyboard(); /* keep input devices drained; no cancelling now */
+			continue;
+		}
+		got = read(fd, buf + used, sizeof buf - 1 - used);
+		if (got <= 0)
+			break;
+		used += (size_t)got;
+		buf[used] = '\0';
+		while (result < 0 && (nl = strchr(buf, '\n')) != NULL) {
+			*nl = '\0';
+			if (strncmp(buf, "step ", 5) == 0) {
+				Util_strlcpy(step, buf + 5, sizeof step);
+				UI_driver->fMessage(step, FALSE);
+			}
+			else if (strncmp(buf, "progress ", 9) == 0) {
+				snprintf(line, sizeof line, "%s %d%%", step, atoi(buf + 9));
+				UI_driver->fMessage(line, FALSE);
+			}
+			else if (strcmp(buf, "OK") == 0)
+				result = TRUE;
+			else if (strncmp(buf, "ERR", 3) == 0) {
+				Util_strlcpy(err, buf[3] ? buf + 4 : "failed", size);
+				result = FALSE;
+			}
+			used -= (size_t)(nl + 1 - buf);
+			memmove(buf, nl + 1, used + 1);
+		}
+		if (used >= sizeof buf - 1)
+			used = 0; /* an over-long line: drop it */
+	}
+	close(fd);
+	return result == TRUE;
+}
+
+/* "Install onto this laptop's disk...": choose the disk, confirm, type
+   ERASE, then follow the install. TRUE when the laptop is rebooting. */
+static int install_menu(void)
+{
+	static char disks[2048];
+	static char names[8][32], models[8][64], sizes[8][16], labels[8][100];
+	UI_tMenuItem menu[9];
+	char text[512], typed[16], cmd[48], err[256], reply[256];
+	const char *p;
+	int n = 0, choice = 0, i, j;
+
+	if (!ctl_request("disks", disks, sizeof disks)) {
+		UI_driver->fMessage(disks[0] ? disks : "Not available", TRUE);
+		return FALSE;
+	}
+	for (p = disks; *p && n < 8; ) {
+		char bytes[32];
+		const char *nl = strchr(p, '\n');
+		if (sscanf(p, "disk %31s %31s %63[^\n]", names[n], bytes, models[n]) == 3) {
+			size_label(sizes[n], sizeof sizes[n], bytes);
+			n++;
+		}
+		p = nl ? nl + 1 : p + strlen(p);
+	}
+	if (n == 0) {
+		UI_driver->fMessage("No internal disk found", TRUE);
+		return FALSE;
+	}
+	if (n > 1) {
+		for (i = 0; i < n; i++) {
+			int twin = FALSE;
+			for (j = 0; j < n; j++)
+				if (j != i && strcmp(models[i], models[j]) == 0 && strcmp(sizes[i], sizes[j]) == 0)
+					twin = TRUE;
+			/* identical disks: the device name tells them apart */
+			if (twin)
+				snprintf(labels[i], sizeof labels[i], "%.24s (%s) %s", models[i], sizes[i], names[i]);
+			else
+				snprintf(labels[i], sizeof labels[i], "%.28s (%s)", models[i], sizes[i]);
+			menu[i].flags = UI_ITEM_ACTION;
+			menu[i].retval = i;
+			menu[i].prefix = NULL;
+			menu[i].item = labels[i];
+			menu[i].suffix = NULL;
+		}
+		menu[n].flags = UI_ITEM_END; menu[n].retval = 0; menu[n].prefix = NULL; menu[n].item = NULL; menu[n].suffix = NULL;
+		choice = UI_driver->fSelect("Install onto", UI_SELECT_POPUP, 0, menu, NULL);
+		if (choice < 0 || choice >= n)
+			return FALSE;
+	}
+	snprintf(text, sizeof text,
+	         "This erases EVERYTHING on %.63s, %.15s.\n"
+	         "The laptop will then boot the Atari from its own disk, BIOS or UEFI, "
+	         "and the USB stick is no longer needed.\n"
+	         "Nothing else can be kept.", models[choice], sizes[choice]);
+	wrapped_page("Install onto this laptop", text);
+	typed[0] = '\0';
+	if (!UI_driver->fEditString("Type ERASE to continue", typed, sizeof typed) || strcmp(typed, "ERASE") != 0) {
+		Log_print("sysmenu: install onto %s cancelled", names[choice]);
+		UI_driver->fMessage("Cancelled: nothing was changed", TRUE);
+		return FALSE;
+	}
+	Log_print("sysmenu: installing onto %s (%s, %s)", names[choice], models[choice], sizes[choice]);
+	snprintf(cmd, sizeof cmd, "install %.31s", names[choice]);
+	UI_driver->fMessage("Starting...", FALSE);
+	if (!install_stream(cmd, err, sizeof err)) {
+		Log_print("sysmenu: install failed: %s", err);
+		snprintf(text, sizeof text, "Install failed.\n%s\nThe stick keeps running as before.", err);
+		wrapped_page("Install", text);
+		return FALSE;
+	}
+	Log_print("sysmenu: install onto %s done", names[choice]);
+	UI_driver->fInfoScreen("Installed",
+		"Installed. Remove the USB stick\0"
+		"and press RETURN to reboot.\0"
+		"\n");
+	ctl_request("reboot", reply, sizeof reply);
+	return TRUE;
+}
+
 /* ---- the menu --------------------------------------------------------- */
 
 void KMS_SYSMENU_Run(void)
@@ -715,17 +886,30 @@ void KMS_SYSMENU_Run(void)
 			UI_MENU_LABEL(""),
 			UI_MENU_ACTION(13, boot_item),
 			UI_MENU_ACTION(6, "Save logs to the stick"),
+			UI_MENU_ACTION(15, "Install onto this laptop's disk..."),
 			UI_MENU_ACTION(7, "Restart emulator"),
 			UI_MENU_ACTION(8, "Reboot laptop"),
 			UI_MENU_ACTION(9, "Shut down"),
 			UI_MENU_ACTION_ACCEL(10, "Back to Atari", "Esc"),
 			UI_MENU_END
 		};
-		int efi;
+		int efi, i;
 
 		have_ctl = ctl_request("status", status, sizeof status);
 		if (!have_ctl)
 			Util_strlcpy(status, "", sizeof status);
+		{
+			/* the install item: only when running from a stick (or an
+			   image file on one) and an internal disk is there */
+			char media[24], inst[16];
+			int show;
+			status_get(status, "media", media, sizeof media, "none");
+			status_get(status, "installable", inst, sizeof inst, "0");
+			show = (strcmp(media, "stick") == 0 || strcmp(media, "image-file") == 0) && atoi(inst) > 0;
+			for (i = 0; menu[i].flags != UI_ITEM_END; i++)
+				if (menu[i].retval == 15 && !show)
+					menu[i].flags = UI_ITEM_HIDDEN;
+		}
 
 		snprintf(fuji_item, sizeof fuji_item, "Boot into: %s", boot_label(boot_of(status, buf, sizeof buf)));
 		vol = ALSA_GetVolume();
@@ -825,6 +1009,10 @@ void KMS_SYSMENU_Run(void)
 		}
 		case 12:
 			hardware_page(status);
+			break;
+		case 15:
+			if (install_menu())
+				done = TRUE;
 			break;
 		case 13:
 			if (efi && !ctl_request("bootnext", reply, sizeof reply)) {

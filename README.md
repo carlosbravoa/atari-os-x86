@@ -46,6 +46,45 @@ and FujiNet's SD folder live in its `atari/` folder, and you can add files
 from any computer. The image is 1 GiB; the rest of a bigger stick stays
 unused for now.
 
+### Install onto the laptop's disk
+
+A laptop that is going to be an Atari and nothing else can run it from its
+own disk, without the stick. Boot the stick on that laptop, then **F8 →
+Install onto this laptop's disk...**. The item is only there when the
+system runs from a stick (or an image file on one, Ventoy) and an internal
+disk of 4 GB or more was found (SATA, NVMe or eMMC; not USB drives, not SD
+cards, not the stick itself).
+
+1. With more than one internal disk, pick one (model and size).
+2. A page says what happens: **everything on that disk is erased**. The
+   whole disk becomes one FAT32 partition; nothing else can be kept, so
+   this is for machines whose old system is not wanted any more.
+3. Type `ERASE` (capitals) and RETURN. Anything else cancels and nothing
+   is written.
+4. Partitioning, formatting, copying the system (with a percentage),
+   installing the boot loader and, on UEFI machines, registering with the
+   firmware take a minute or two. Then remove the stick and press RETURN:
+   the laptop reboots into the Atari from its disk.
+
+What gets copied is the stick's FAT as it is: the system, `atari/` with
+your library, settings and FujiNet SD. The disk boots on BIOS (Limine in
+the MBR, partition marked active) and UEFI (`\EFI\BOOT\BOOTX64.EFI`, plus a
+firmware boot entry "Atari"). **The installer puts that entry first in the
+machine's UEFI boot order.** It is the only place this project changes the
+boot order, and only because you have just typed ERASE for a disk that will
+hold no other system; an "Atari" entry from an earlier install is reused.
+Secure Boot must stay off (Limine is unsigned).
+
+The installed copy's `limine.conf` carries `atari.media=<volume serial>`,
+so with the stick still plugged in the system uses the copy it booted from
+and leaves the stick alone (it shows up as "another atari-os stick, not
+used"). The other way round, a stick booted on a laptop that has an
+installed copy uses the stick (sticks are looked for first), so a newer
+stick can install over an older installation. To update an installed
+laptop by hand, copy a new `atari-os/` folder onto its disk (it is a plain
+FAT32 drive) or install again from a new stick (that erases `atari/` too:
+copy anything you want to keep first).
+
 ## How it works
 
 ```
@@ -54,7 +93,8 @@ Firmware (BIOS or UEFI)
       └─ Linux (Alpine linux-lts) + initramfs
           └─ /init  (init/init.c, static)
               ├─ loads drivers by modalias (no udev)
-              ├─ mounts the stick, attaches modloop (modules + firmware)
+              ├─ mounts the stick (or the disk it was installed on),
+              │  attaches modloop (modules + firmware)
               └─ runs the emulator and keeps it running
                    video: DRM/KMS dumb buffers, CPU scaling, vsync page flips
                    audio: ALSA PCM directly
@@ -122,7 +162,9 @@ style as the emulator's own, backed by PID 1 over a Unix socket:
   system and pacing, sound card, Wi-Fi, IP, battery, boot medium, boot
   target, kernel
 - **Reboot straight back into Atari** (UEFI `BootNext`, a one-shot request
-  for the next start only; the machine's boot order is never touched)
+  for the next start only; the machine's boot order is not touched)
+- **Install onto this laptop's disk...** (only when running from a stick
+  and an internal disk is there; see "Install onto the laptop's disk")
 - Save logs to the stick, restart emulator, reboot, **shut down** (besides
   the power button, the only way to power off: F9 no longer quits)
 
@@ -303,12 +345,38 @@ QEMU_EXTRA="-drive if=none,id=usb2,format=raw,file=build/usb-test.img \
   -device usb-storage,bus=xhci.0,drive=usb2,removable=on" scripts/qemu-test.sh start
 ```
 
+The installer needs internal disks that keep what is written to them:
+`scripts/mk-install-test.sh [file] [size]` makes a blank sparse
+`build/install-test.img` (8G), and `QEMU_DISK="file[:ide|virtio|nvme] ..."`
+attaches each as a non-removable disk with `snapshot=off` (everything else
+stays `-snapshot`). `QEMU_IMG_AS=ide|virtio|nvme` boots the main image as an
+internal disk instead of a USB stick, and `QEMU_VARS=<file>` gives OVMF a
+persistent variable store (copied from `OVMF_VARS_4M.fd` when missing), so
+the installer's boot entry survives into the next run. In BIOS mode the
+main image gets `bootindex=0` (SeaBIOS only tries one hard disk); UEFI runs
+get none, so OVMF keeps its own `BootOrder`.
+
+```sh
+scripts/mk-install-test.sh
+QEMU_VARS=build/qemu-test/vars.fd QEMU_DISK=build/install-test.img scripts/qemu-test.sh start uefi
+#   F8 > Install onto this laptop's disk... > ERASE, then RETURN (QEMU exits on reboot)
+QEMU_VARS=build/qemu-test/vars.fd QEMU_IMG=build/install-test.img QEMU_IMG_AS=ide scripts/qemu-test.sh start uefi
+```
+
+The socket commands behind it are `disks` (`disk <name> <bytes> <model>`
+lines) and `install <name>` (streams `step <text>` and `progress <pct>`
+lines, then `OK` or `ERR <text>`); `status` has `media
+stick|image-file|disk|none` and `installable <n>`. Every step is logged as
+`install: ...` in dmesg.
+
 Kernel command-line knobs for debugging: `atari.perf=1` (every 10 s, CPU
 use of atari800, fujinet, wpa_supplicant, dropbear and init, package power
 from RAPL, CPU temperature and clock to `atari/logs/perf.log`; the socket
 command `perf on|off` does the same at run time), `atari.debug=1` (serial shell,
 `-evdev-debug -kms-debug` on the emulator, emulator exit restarts instead of
 powering off), `atari.noemu=1`, `atari.emudelay=N`, `atari.nomedia=1`,
+`atari.media=XXXX-XXXX` (use the FAT32 volume with that serial as the
+stick; the installer sets it),
 `atari.hwsim=1` (two virtual Wi-Fi radios via `mac80211_hwsim`, so the
 Wi-Fi menu can be exercised in QEMU against an access point started on
 `wlan1` from the debug shell). `QEMU_NONET=1` starts QEMU without a

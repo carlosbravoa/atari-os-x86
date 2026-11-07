@@ -23,3 +23,4 @@ reply all show the version they were built from.
 - Versioned images (`atari-os-x86-<version>.img`), version on the splash, hardware page and `status` reply
 - Release pipeline: GitHub Actions build, host `-Werror` build and QEMU smoke boot on every push; releases on `v*` tags
 - `scripts/flash.sh`: a safe stick writer for Linux and macOS (removable disks only, type the name, verify by read-back)
+- Install onto the laptop's own disk from the F8 menu (whole disk, type ERASE): one FAT32 partition, boots on BIOS and UEFI (firmware entry "Atari" first in the boot order); `atari.media=<serial>` makes the installed copy win over a stick left plugged in, and a booted stick wins over an installed copy

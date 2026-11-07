@@ -24,6 +24,17 @@
   then TLS (HTTPS hosts in FujiNet) fails.
 - **amdgpu firmware** makes the modloop ~400 MB; per-GPU trimming is
   pending.
+- **Installing onto the laptop's disk** (F8): Secure Boot must be off on
+  UEFI machines (Limine is unsigned), as for the stick. The installer
+  makes exactly one partition over the whole disk and erases everything
+  else; there is no dual boot from the menu (a Linux-host script and a
+  Windows installer for that are separate, later work). The partition
+  table is MBR, so on disks over 2 TiB only the first 2 TiB are used.
+  Some UEFI firmware ignores or drops boot entries written by the OS; such
+  a laptop still boots the disk through the removable-media path
+  (`\EFI\BOOT\BOOTX64.EFI`) once nothing else comes first in its boot
+  order. Tested in QEMU (SeaBIOS, OVMF; SATA, NVMe, virtio), not yet on a
+  real laptop.
 
 ## ASH: copying or saving to h: fails (ASH 1.3 TN bug)
 

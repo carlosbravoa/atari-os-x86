@@ -10,7 +10,8 @@
  *      squashfs ("modloop") so GPU, sound and network drivers can load,
  *   4. starts the emulator and keeps it running,
  *   5. powers the machine off on the power button, lid, or emulator exit,
- *   6. mounts USB drives under /media/usb for the emulator's Library (F9).
+ *   6. mounts USB drives under /media/usb for the emulator's Library (F9),
+ *   7. installs the system onto the laptop's own disk when asked (F8).
  *
  * Kernel command line options:
  *   atari.debug=1      spawn a root shell on the serial console (ttyS0)
@@ -22,6 +23,9 @@
  *                      networking, to exercise the Wi-Fi code in QEMU
  *   atari.perf=1       log CPU use, package power, temperature and clock
  *                      every 10 s to atari/logs/perf.log (socket: perf on)
+ *   atari.media=XXXX-XXXX  the FAT32 volume serial of the copy we were
+ *                      booted from (set by the installer on an internal
+ *                      disk): that partition is used as /media first
  *
  * Licence: GPL-2.0-or-later, like the emulator it serves.
  */
@@ -32,6 +36,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -54,6 +59,7 @@
 #include <drm/drm_mode.h>
 #include "font_atari.h"
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <linux/input.h>
@@ -117,7 +123,9 @@ static struct {
 	char rootpw[160]; /* crypt(3) hash, empty = keys only */
 } conf = { 0, 0, "" };
 static int efi_ok = 0;
-static char media_kind[32] = "none";
+static char media_kind[32] = "none"; /* stick, image-file, disk (installed) or none */
+static char media_serial[16] = "";   /* atari.media=: FAT32 serial to prefer */
+static pid_t install_pid = -1;       /* the installer child, one at a time */
 /* Build version, one line in /etc/atari-os-release (scripts/mkimage.sh). */
 static char os_version[48] = "unknown";
 
@@ -710,6 +718,7 @@ static void uevent_read(void)
 /* ---- boot media -------------------------------------------------------- */
 
 static int try_image_file(const char *dev);
+static int disk_of(const char *link, char *out, size_t size);
 
 static int try_mount_media(const char *dev)
 {
@@ -718,49 +727,114 @@ static int try_mount_media(const char *dev)
 	for (i = 0; fstypes[i]; i++) {
 		const char *opts = i == 0 ? "flush,shortname=mixed,errors=continue" : "";
 		if (mount(dev, MEDIA, fstypes[i], MS_NOATIME | MS_NODEV | MS_NOSUID, opts) == 0) {
-			if (exists(MODLOOP_IMG))
+			if (exists(MODLOOP_IMG)) {
+				logmsg("media: %s (%s)", dev, fstypes[i]);
 				return 1;
+			}
 			umount2(MEDIA, MNT_DETACH);
 		}
 	}
 	return 0;
 }
 
-static int scan_block_devices(void)
+/* An internal disk ("sda", "nvme0n1", "mmcblk0"): not removable, not on
+   USB, not an SD card (those are the USB code's, see usb_candidate). */
+static int disk_internal(const char *disk)
 {
-	DIR *d = opendir("/sys/class/block");
-	struct dirent *e;
-	char dev[320];
-	int found = 0;
+	char path[300], real[PATH_MAX], val[16];
+	snprintf(path, sizeof path, "/sys/block/%s", disk);
+	if (!realpath(path, real) || strstr(real, "/usb"))
+		return 0;
+	snprintf(path, sizeof path, "/sys/block/%s/removable", disk);
+	if (read_file(path, val, sizeof val) <= 0 || strcmp(val, "0") != 0)
+		return 0;
+	if (strncmp(disk, "mmcblk", 6) == 0) {
+		snprintf(path, sizeof path, "/sys/block/%s/device/type", disk);
+		if (read_file(path, val, sizeof val) > 0 && strcmp(val, "SD") == 0)
+			return 0;
+	}
+	return 1;
+}
 
-	if (!d)
+/* Is block device NAME (a disk or a partition) on an internal disk? */
+static int on_internal_disk(const char *name)
+{
+	char link[300], disk[64];
+	snprintf(link, sizeof link, "/sys/class/block/%s", name);
+	return disk_of(link, disk, sizeof disk) && disk_internal(disk);
+}
+
+/* The volume serial of a FAT32 filesystem, as blkid prints it
+   ("1A2B-3C4D"): the boot sector's volume ID at 0x43. */
+static int fat_serial(const char *dev, char *out, size_t size)
+{
+	unsigned char bs[512];
+	int fd = open(dev, O_RDONLY | O_CLOEXEC);
+	ssize_t n;
+	out[0] = '\0';
+	if (fd < 0)
 		return 0;
-	while (!found && (e = readdir(d)) != NULL) {
-		if (e->d_name[0] == '.' || strncmp(e->d_name, "loop", 4) == 0
-		    || strncmp(e->d_name, "ram", 3) == 0 || strncmp(e->d_name, "zram", 4) == 0)
-			continue;
-		snprintf(dev, sizeof dev, "/dev/%s", e->d_name);
-		if (!exists(dev))
-			continue;
-		found = try_mount_media(dev);
-	}
-	closedir(d);
-	if (found)
-		return 1;
-	/* Second pass: our image as a file on somebody else's partition. */
-	d = opendir("/sys/class/block");
-	if (!d)
+	n = pread(fd, bs, sizeof bs, 0);
+	close(fd);
+	if (n != (ssize_t)sizeof bs || bs[510] != 0x55 || bs[511] != 0xaa || memcmp(bs + 0x52, "FAT32   ", 8) != 0)
 		return 0;
-	while (!found && (e = readdir(d)) != NULL) {
-		if (e->d_name[0] == '.' || strncmp(e->d_name, "loop", 4) == 0
-		    || strncmp(e->d_name, "ram", 3) == 0 || strncmp(e->d_name, "zram", 4) == 0)
-			continue;
-		snprintf(dev, sizeof dev, "/dev/%s", e->d_name);
-		if (!exists(dev))
-			continue;
-		found = try_image_file(dev);
+	snprintf(out, size, "%02X%02X-%02X%02X", bs[0x46], bs[0x45], bs[0x44], bs[0x43]);
+	return 1;
+}
+
+static int skip_blockdev(const char *name)
+{
+	return name[0] == '.' || strncmp(name, "loop", 4) == 0 || strncmp(name, "ram", 3) == 0
+	       || strncmp(name, "zram", 4) == 0;
+}
+
+/* WAITED: milliseconds since the search began. */
+static int scan_block_devices(int waited)
+{
+	DIR *d;
+	struct dirent *e;
+	char dev[320], serial[16];
+	int pass, found = 0;
+
+	/* atari.media=<serial> (an installed disk's limine.conf): the copy we
+	   were booted from comes first. For the first seconds nothing else
+	   will do, the disk may not have shown up yet. */
+	if (media_serial[0]) {
+		d = opendir("/sys/class/block");
+		while (d && !found && (e = readdir(d)) != NULL) {
+			if (skip_blockdev(e->d_name))
+				continue;
+			snprintf(dev, sizeof dev, "/dev/%s", e->d_name);
+			if (!exists(dev) || !fat_serial(dev, serial, sizeof serial) || strcmp(serial, media_serial) != 0)
+				continue;
+			logmsg("media: %s has serial %s (atari.media)", dev, serial);
+			found = try_mount_media(dev);
+		}
+		if (d)
+			closedir(d);
+		if (found || waited < 5000)
+			return found;
+		logmsg("media: no filesystem with serial %s, looking further", media_serial);
 	}
-	closedir(d);
+	/* Sticks before internal disks: a copy installed there earlier must
+	   not hide the stick we booted from (its kernel would run on the
+	   disk's modules, and the stick could not install again). USB comes
+	   up later than SATA/NVMe, so internal disks only count after a few
+	   seconds without a stick. Within each, a FAT of our own before our
+	   image as a file on somebody else's partition. */
+	for (pass = 0; pass < (waited < 5000 ? 2 : 4) && !found; pass++) {
+		d = opendir("/sys/class/block");
+		while (d && !found && (e = readdir(d)) != NULL) {
+			if (skip_blockdev(e->d_name) || on_internal_disk(e->d_name) != (pass >= 2))
+				continue;
+			snprintf(dev, sizeof dev, "/dev/%s", e->d_name);
+			if (!exists(dev))
+				continue;
+			found = (pass & 1) ? try_image_file(dev) : try_mount_media(dev);
+		}
+		if (d)
+			closedir(d);
+	}
 	return found;
 }
 
@@ -769,7 +843,7 @@ static void find_media(void)
 	int waited = 0;
 	mkdir_p(MEDIA, 0755);
 	while (waited < MEDIA_WAIT_S * 1000) {
-		if (scan_block_devices()) {
+		if (scan_block_devices(waited)) {
 			media_mounted = 1;
 			if (strcmp(media_kind, "none") == 0)
 				snprintf(media_kind, sizeof media_kind, "stick");
@@ -1142,6 +1216,11 @@ static void usb_setup(void)
 	if (mount("tmpfs", USB_DIR, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755,size=64k") != 0)
 		logmsg("usb: tmpfs on %s failed: %s", USB_DIR, strerror(errno));
 	usb_find_boot_disks();
+	/* Booted from an internal disk (an installed system), not a stick. */
+	if (strcmp(media_kind, "stick") == 0 && boot_disks[0][0] && disk_internal(boot_disks[0])) {
+		snprintf(media_kind, sizeof media_kind, "disk");
+		logmsg("media: on internal disk %s", boot_disks[0]);
+	}
 	usb_scan();
 }
 
@@ -1727,14 +1806,676 @@ static void efi_setup(void)
 }
 
 /* Boot this same entry once more on the next start (no boot menu key).
-   Only BootNext is ever written: the user's BootOrder is not ours to
-   change. */
+   Only BootNext is written: the user's BootOrder is not ours to change
+   (the one exception is the installer, efi_install_entry below). */
 static int efi_bootnext(void)
 {
 	uint8_t cur[8];
 	if (!efi_ok || efi_read("BootCurrent", cur, sizeof cur) < 2)
 		return -1;
 	return efi_write("BootNext", cur + 4, 2);
+}
+
+static void put16(uint8_t *p, unsigned v)
+{
+	p[0] = (uint8_t)v;
+	p[1] = (uint8_t)(v >> 8);
+}
+
+static void put32(uint8_t *p, uint32_t v)
+{
+	put16(p, v & 0xffff);
+	put16(p + 2, v >> 16);
+}
+
+static void put64(uint8_t *p, uint64_t v)
+{
+	put32(p, (uint32_t)v);
+	put32(p + 4, (uint32_t)(v >> 32));
+}
+
+#define EFI_ATARI_DESC "Atari"
+#define EFI_ATARI_FILE "\\EFI\\BOOT\\BOOTX64.EFI"
+
+/* Is this load option (without the attribute prefix) one of ours? */
+static int efi_option_is_atari(const uint8_t *opt, int len)
+{
+	static const char desc[] = EFI_ATARI_DESC;
+	int i;
+	if (len < 6 + 2 * (int)sizeof desc)
+		return 0;
+	for (i = 0; i < (int)sizeof desc; i++)
+		if (opt[6 + 2 * i] != (uint8_t)desc[i] || opt[7 + 2 * i] != 0)
+			return 0;
+	return 1;
+}
+
+/* The installer's firmware entry: Boot#### "Atari" =
+   HD(1,MBR,<signature>,<start>,<size>)/\EFI\BOOT\BOOTX64.EFI, put first
+   in BootOrder. This is the one place the boot order is changed, and only
+   because the user has just typed ERASE for a disk that will hold no
+   other system. An "Atari" entry from an earlier install is reused. */
+static int efi_install_entry(uint32_t sig, uint64_t start, uint64_t size, char *err, size_t esize)
+{
+	uint8_t opt[256], order[4 + 256], cur[4 + 256], neworder[256];
+	char name[16], path[200];
+	const char *file = EFI_ATARI_FILE;
+	int n, dp, i, k, len, cnt, num = -1;
+
+	put32(opt, 1); /* LOAD_OPTION_ACTIVE */
+	n = 6;         /* the device path length goes at 4 */
+	for (i = 0; EFI_ATARI_DESC[i]; i++, n += 2)
+		put16(opt + n, (unsigned char)EFI_ATARI_DESC[i]);
+	put16(opt + n, 0);
+	n += 2;
+	dp = n;
+	opt[n] = 4; opt[n + 1] = 1; put16(opt + n + 2, 42); /* media, hard drive */
+	put32(opt + n + 4, 1);
+	put64(opt + n + 8, start);
+	put64(opt + n + 16, size);
+	memset(opt + n + 24, 0, 16);
+	put32(opt + n + 24, sig);
+	opt[n + 40] = 1; /* MBR partition table */
+	opt[n + 41] = 1; /* 32-bit MBR signature */
+	n += 42;
+	len = 4 + 2 * ((int)strlen(file) + 1);
+	opt[n] = 4; opt[n + 1] = 4; put16(opt + n + 2, (unsigned)len); /* media, file path */
+	for (i = 0; file[i]; i++)
+		put16(opt + n + 4 + 2 * i, (unsigned char)file[i]);
+	put16(opt + n + 4 + 2 * i, 0);
+	n += len;
+	opt[n] = 0x7f; opt[n + 1] = 0xff; put16(opt + n + 2, 4); /* end */
+	n += 4;
+	put16(opt + 4, (unsigned)(n - dp));
+
+	cnt = efi_read("BootOrder", order, sizeof order);
+	cnt = cnt > 0 ? cnt / 2 : 0;
+	for (i = 0; i < cnt && num < 0; i++) {
+		int e = order[4 + 2 * i] | order[5 + 2 * i] << 8;
+		snprintf(name, sizeof name, "Boot%04X", e);
+		len = efi_read(name, cur, sizeof cur);
+		if (len > 0 && efi_option_is_atari(cur + 4, len))
+			num = e;
+	}
+	for (i = 0; num < 0 && i < 0x10000; i++) {
+		snprintf(path, sizeof path, EFIVARS "/Boot%04X-" EFI_GLOBAL, i);
+		if (!exists(path))
+			num = i;
+	}
+	if (num < 0) {
+		snprintf(err, esize, "no free Boot#### number");
+		return -1;
+	}
+	snprintf(name, sizeof name, "Boot%04X", num);
+	if (efi_write(name, opt, (size_t)n) != 0) {
+		snprintf(err, esize, "cannot write %s: %s", name, strerror(errno));
+		return -1;
+	}
+	put16(neworder, (unsigned)num);
+	for (i = 0, k = 1; i < cnt && k < 128; i++) {
+		int e = order[4 + 2 * i] | order[5 + 2 * i] << 8;
+		if (e != num)
+			put16(neworder + 2 * k++, (unsigned)e);
+	}
+	if (efi_write("BootOrder", neworder, (size_t)(2 * k)) != 0) {
+		snprintf(err, esize, "cannot write BootOrder: %s", strerror(errno));
+		return -1;
+	}
+	if (efi_read("BootOrder", order, sizeof order) < 2 || (order[4] | order[5] << 8) != num) {
+		snprintf(err, esize, "the firmware did not keep the boot order");
+		return -1;
+	}
+	logmsg("install: firmware entry %s \"" EFI_ATARI_DESC "\" first in BootOrder (%d entries)", name, k);
+	return 0;
+}
+
+/* ---- install onto an internal disk ------------------------------------------ */
+
+/* F8 "Install onto this laptop's disk": the whole disk becomes one FAT32
+   partition holding a copy of the running media, bootable on BIOS (Limine
+   in the MBR) and UEFI (the removable-media path plus a firmware entry).
+   The work happens in a child of init that streams "step", "progress" and
+   finally "OK"/"ERR" lines to the menu's socket. */
+#define INSTALL_MNT      "/mnt/install"
+#define INSTALL_OUT      "/run/install.out"   /* output of the current tool */
+#define INSTALL_SFDISK   "/run/install.sfdisk"
+#define INSTALL_MIN_SECT (8UL * 1024 * 1024)  /* 4 GiB in 512-byte sectors */
+
+/* NAME is a whole disk we may offer: internal, not what we booted from,
+   at least 4 GiB. Fills in its size and a model name when asked. */
+static int install_candidate(const char *name, uint64_t *bytes, char *model, size_t msize)
+{
+	static const char *const skip[] = { "loop", "ram", "zram", "sr", "fd", "dm-", "md", "nbd", "zd", NULL };
+	char path[300], val[128];
+	uint64_t sectors = 0;
+	int i;
+
+	if (name[0] == '.' || strlen(name) > 31 || strchr(name, '/'))
+		return 0;
+	for (i = 0; skip[i]; i++)
+		if (strncmp(name, skip[i], strlen(skip[i])) == 0)
+			return 0;
+	if (strncmp(name, "mmcblk", 6) == 0 && (strstr(name, "boot") || strstr(name, "rpmb")))
+		return 0;
+	for (i = 0; i < 2; i++)
+		if (boot_disks[i][0] && strcmp(name, boot_disks[i]) == 0)
+			return 0;
+	snprintf(path, sizeof path, "/sys/block/%s", name);
+	if (!exists(path) || !disk_internal(name))
+		return 0;
+	snprintf(path, sizeof path, "/sys/block/%s/hidden", name);
+	if (read_file(path, val, sizeof val) > 0 && strcmp(val, "1") == 0)
+		return 0;
+	snprintf(path, sizeof path, "/sys/block/%s/ro", name);
+	if (read_file(path, val, sizeof val) > 0 && strcmp(val, "1") == 0)
+		return 0;
+	snprintf(path, sizeof path, "/sys/block/%s/size", name);
+	if (read_file(path, val, sizeof val) <= 0 || sscanf(val, "%" SCNu64, &sectors) != 1
+	    || sectors < INSTALL_MIN_SECT)
+		return 0;
+	if (bytes)
+		*bytes = sectors * 512;
+	if (model) {
+		char *p;
+		snprintf(path, sizeof path, "/sys/block/%s/device/model", name);
+		if (read_file(path, val, sizeof val) <= 0) {
+			snprintf(path, sizeof path, "/sys/block/%s/device/name", name); /* eMMC */
+			if (read_file(path, val, sizeof val) <= 0)
+				snprintf(val, sizeof val, "%s", strncmp(name, "vd", 2) == 0 ? "Virtio disk" : name);
+		}
+		for (p = val; *p == ' '; p++)
+			;
+		snprintf(model, msize, "%.*s", (int)msize - 1, p);
+		for (p = model; *p; p++)
+			if ((unsigned char)*p < 32 || (unsigned char)*p > 126)
+				*p = '?';
+	}
+	return 1;
+}
+
+static int install_count(void)
+{
+	DIR *d = opendir("/sys/block");
+	struct dirent *e;
+	int n = 0;
+	while (d && (e = readdir(d)) != NULL)
+		n += install_candidate(e->d_name, NULL, NULL, 0);
+	if (d)
+		closedir(d);
+	return n;
+}
+
+static void reply(int fd, const char *s);
+
+/* "disks": "disk <name> <bytes> <model>" per candidate, then OK */
+static void cmd_disks(int fd)
+{
+	DIR *d = opendir("/sys/block");
+	struct dirent *e;
+	char line[200], model[96];
+	uint64_t bytes;
+	while (d && (e = readdir(d)) != NULL) {
+		if (!install_candidate(e->d_name, &bytes, model, sizeof model))
+			continue;
+		snprintf(line, sizeof line, "disk %.31s %" PRIu64 " %.95s\n", e->d_name, bytes, model);
+		reply(fd, line);
+	}
+	if (d)
+		closedir(d);
+	reply(fd, "OK\n");
+}
+
+/* -- the installer child -- */
+
+static int inst_sock = -1;       /* the menu's connection; -1 once it is gone */
+static const char *inst_disk;    /* "sda" */
+static uint64_t inst_total = 0;  /* bytes to copy (rounded to clusters) */
+static uint64_t inst_base = 0;   /* bytes written to the disk before the copy */
+static int inst_pct = -1;
+
+static void inst_send(const char *fmt, ...)
+{
+	char buf[400];
+	va_list ap;
+	int n;
+	va_start(ap, fmt);
+	n = vsnprintf(buf, sizeof buf - 1, fmt, ap);
+	va_end(ap);
+	if (n < 0 || inst_sock < 0)
+		return;
+	if (n > (int)sizeof buf - 2)
+		n = sizeof buf - 2;
+	buf[n++] = '\n';
+	if (send(inst_sock, buf, (size_t)n, MSG_NOSIGNAL) < 0)
+		inst_sock = -1; /* the menu went away: carry on regardless */
+}
+
+static void inst_step(const char *text)
+{
+	logmsg("install: %s", text);
+	inst_send("step %s", text);
+}
+
+static int inst_fail(const char *step, const char *why)
+{
+	int len = (int)strcspn(step, "."); /* "Partitioning: ...", not "Partitioning...: ..." */
+	logmsg("install: %.*s failed: %s", len, step, why);
+	inst_send("ERR %.*s: %s", len, step, why);
+	return 1;
+}
+
+/* Run a tool with stdin from IN (or /dev/null), its output to INSTALL_OUT;
+   TICK, if any, is called about once a second while it runs. Returns the
+   exit status (0 = success); on failure ERR gets the last line it printed. */
+static int inst_run(char *const argv[], const char *in, void (*tick)(void), char *err, size_t esize)
+{
+	char out[2048];
+	int status = 0, out_fd, waited = 0, rc;
+	pid_t pid;
+
+	err[0] = '\0';
+	out_fd = open(INSTALL_OUT, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	pid = fork();
+	if (pid < 0) {
+		if (out_fd >= 0)
+			close(out_fd);
+		snprintf(err, esize, "fork: %s", strerror(errno));
+		return -1;
+	}
+	if (pid == 0) {
+		int fd = open(in ? in : "/dev/null", O_RDONLY);
+		if (fd >= 0)
+			dup2(fd, 0);
+		if (out_fd >= 0) {
+			dup2(out_fd, 1);
+			dup2(out_fd, 2);
+		}
+		execv(argv[0], argv);
+		_exit(127);
+	}
+	if (out_fd >= 0)
+		close(out_fd);
+	for (;;) {
+		pid_t r = waitpid(pid, &status, WNOHANG);
+		if (r == pid)
+			break;
+		if (r < 0 && errno != EINTR) {
+			status = 0x7f00;
+			break;
+		}
+		sleep_ms(50);
+		if (tick && (waited += 50) % 1000 == 0)
+			tick();
+	}
+	rc = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+	if (rc == 0)
+		return 0;
+	if (read_file(INSTALL_OUT, out, sizeof out) > 0) {
+		char *last = strrchr(out, '\n');
+		snprintf(err, esize, "%.*s", (int)esize - 1, last ? last + 1 : out);
+	}
+	if (!err[0])
+		snprintf(err, esize, "%s failed (status %d)", argv[0], rc);
+	logmsg("install: %s: status %d: %s", argv[0], rc, err);
+	return rc;
+}
+
+/* Bytes the tree at PATH takes on a FAT with CLUSTER-byte clusters
+   (one cluster per directory); other filesystems mounted below are left out. */
+static uint64_t inst_tree_bytes(const char *path, dev_t dev, uint64_t cluster)
+{
+	struct stat st;
+	DIR *d;
+	struct dirent *e;
+	char sub[PATH_MAX];
+	uint64_t sum;
+
+	if (lstat(path, &st) != 0 || st.st_dev != dev)
+		return 0;
+	if (!S_ISDIR(st.st_mode))
+		return ((uint64_t)st.st_size + cluster - 1) / cluster * cluster;
+	sum = cluster;
+	d = opendir(path);
+	while (d && (e = readdir(d)) != NULL) {
+		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+			continue;
+		snprintf(sub, sizeof sub, "%s/%s", path, e->d_name);
+		sum += inst_tree_bytes(sub, dev, cluster);
+	}
+	if (d)
+		closedir(d);
+	return sum;
+}
+
+/* Bytes written to the target disk so far (/sys/block/X/stat, field 7).
+   Used for progress instead of the filesystem's used space, which runs
+   ahead by whatever the page cache holds and then stalls in the final
+   sync. */
+static uint64_t inst_written(void)
+{
+	char path[64], buf[256];
+	uint64_t f[7];
+	snprintf(path, sizeof path, "/sys/block/%.31s/stat", inst_disk);
+	if (read_file(path, buf, sizeof buf) <= 0
+	    || sscanf(buf, "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64,
+	              &f[0], &f[1], &f[2], &f[3], &f[4], &f[5], &f[6]) != 7)
+		return 0;
+	return f[6] * 512;
+}
+
+/* While cp and the final sync run: "progress <pct>". */
+static void inst_copy_tick(void)
+{
+	uint64_t done = inst_written();
+	int pct = 0;
+	if (done > inst_base && inst_total > 0)
+		pct = (int)((done - inst_base) * 100 / inst_total);
+	if (pct > 99)
+		pct = 99;
+	if (pct != inst_pct) {
+		inst_pct = pct;
+		inst_send("progress %d", pct);
+	}
+}
+
+/* Append atari.media=<serial> to every cmdline: of the copy's limine.conf. */
+static int inst_edit_conf(const char *serial, char *err, size_t esize)
+{
+	static char in[16384], out[20000];
+	char *line, *next;
+	size_t used = 0;
+	int edited = 0;
+	FILE *f;
+
+	if (read_file(INSTALL_MNT "/limine.conf", in, sizeof in) <= 0) {
+		snprintf(err, esize, "no limine.conf on the copy");
+		return -1;
+	}
+	for (line = in; line; line = next) {
+		const char *p = line;
+		next = strchr(line, '\n');
+		if (next)
+			*next++ = '\0';
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (used + strlen(line) + 40 >= sizeof out)
+			break;
+		if (strncmp(p, "cmdline:", 8) == 0 && !strstr(line, "atari.media=")) {
+			used += (size_t)sprintf(out + used, "%s atari.media=%s\n", line, serial);
+			edited++;
+		}
+		else
+			used += (size_t)sprintf(out + used, "%s\n", line);
+	}
+	if (edited == 0) {
+		snprintf(err, esize, "no cmdline: in limine.conf");
+		return -1;
+	}
+	f = fopen(INSTALL_MNT "/limine.conf", "w");
+	if (!f || fwrite(out, 1, used, f) != used || fflush(f) != 0 || fsync(fileno(f)) != 0) {
+		snprintf(err, esize, "cannot write limine.conf: %s", strerror(errno));
+		if (f)
+			fclose(f);
+		return -1;
+	}
+	fclose(f);
+	logmsg("install: limine.conf: atari.media=%s on %d entries", serial, edited);
+	return 0;
+}
+
+/* Is anything on DISK mounted? */
+static int inst_disk_busy(const char *dev)
+{
+	char line[512];
+	size_t len = strlen(dev);
+	int busy = 0;
+	FILE *f = fopen("/proc/mounts", "r");
+	while (f && !busy && fgets(line, sizeof line, f))
+		busy = strncmp(line, dev, len) == 0
+		       && (line[len] == ' ' || line[len] == 'p' || isdigit((unsigned char)line[len]));
+	if (f)
+		fclose(f);
+	return busy;
+}
+
+static int install_run(const char *disk)
+{
+	static const char *const S_PART = "Partitioning...", *const S_FORMAT = "Formatting...",
+		*const S_COPY = "Copying system...", *const S_BOOT = "Installing boot loader...",
+		*const S_EFI = "Registering with the firmware...";
+	char dev[48], part[48], partname[40], path[300], val[64], err[300], serial[16], spc[8];
+	unsigned char mbr[512];
+	uint64_t sectors = 0, pstart = 0, psize = 0, lsect, maxsect, free_bytes;
+	uint32_t sig = 0;
+	unsigned lbs = 512, cl = 8;
+	int fd, i;
+	FILE *f;
+	struct stat st;
+	struct statvfs sv;
+	DIR *d;
+	struct dirent *e;
+
+	snprintf(dev, sizeof dev, "/dev/%.31s", disk);
+	snprintf(partname, sizeof partname, "%.31s%s1", disk, isdigit((unsigned char)disk[strlen(disk) - 1]) ? "p" : "");
+	snprintf(part, sizeof part, "/dev/%.39s", partname);
+	logmsg("install: onto %s (%s)", dev, part);
+
+	/* 1. one MBR partition, type 0c, bootable, 1 MiB to the end (as mkimage.sh) */
+	inst_step(S_PART);
+	if (inst_disk_busy(dev))
+		return inst_fail(S_PART, "the disk is in use (mounted)");
+	snprintf(path, sizeof path, "/sys/block/%.31s/size", disk);
+	if (read_file(path, val, sizeof val) > 0)
+		sscanf(val, "%" SCNu64, &sectors);
+	snprintf(path, sizeof path, "/sys/block/%.31s/queue/logical_block_size", disk);
+	if (read_file(path, val, sizeof val) > 0 && atoi(val) >= 512)
+		lbs = (unsigned)atoi(val);
+	lsect = sectors / (lbs / 512); /* in logical sectors, as sfdisk counts */
+	fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+	while (fd >= 0 && sig == 0)
+		if (read(fd, &sig, sizeof sig) != (ssize_t)sizeof sig)
+			break;
+	if (fd >= 0)
+		close(fd);
+	if (sig == 0)
+		sig = (uint32_t)time(NULL) ^ 0x41544152u;
+	f = fopen(INSTALL_SFDISK, "w");
+	if (!f)
+		return inst_fail(S_PART, strerror(errno));
+	fprintf(f, "label: dos\nlabel-id: 0x%08x\nunit: sectors\n\n", (unsigned)sig);
+	/* MBR counts sectors in 32 bits: larger disks get a 2 TiB partition */
+	maxsect = 0xffffffffUL;
+	if (lsect > maxsect)
+		fprintf(f, "start=2048, size=%" PRIu64 ", type=c, bootable\n", maxsect - 2048);
+	else
+		fprintf(f, "start=2048, type=c, bootable\n");
+	fclose(f);
+	{
+		char *argv[] = { "/sbin/sfdisk", "--wipe", "always", "--wipe-partitions", "always", "-q", dev, NULL };
+		if (inst_run(argv, INSTALL_SFDISK, NULL, err, sizeof err) != 0)
+			return inst_fail(S_PART, err);
+	}
+	fd = open(dev, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		if (ioctl(fd, BLKRRPART) != 0 && errno != EBUSY)
+			logmsg("install: BLKRRPART %s: %s", dev, strerror(errno));
+		close(fd);
+	}
+	snprintf(path, sizeof path, "/sys/class/block/%s/start", partname);
+	for (i = 0; i < 100 && !(exists(part) && exists(path)); i++)
+		sleep_ms(50);
+	if (!exists(part) || read_file(path, val, sizeof val) <= 0)
+		return inst_fail(S_PART, "the new partition did not appear");
+	sscanf(val, "%" SCNu64, &pstart);
+	snprintf(path, sizeof path, "/sys/class/block/%s/size", partname);
+	if (read_file(path, val, sizeof val) > 0)
+		sscanf(val, "%" SCNu64, &psize);
+	pstart /= lbs / 512; /* sysfs counts 512-byte units; LBAs are logical sectors */
+	psize /= lbs / 512;
+	fd = open(dev, O_RDONLY | O_CLOEXEC);
+	if (fd < 0 || pread(fd, mbr, sizeof mbr, 0) != (ssize_t)sizeof mbr) {
+		if (fd >= 0)
+			close(fd);
+		return inst_fail(S_PART, "cannot read the new partition table back");
+	}
+	close(fd);
+	if ((mbr[440] | mbr[441] << 8 | mbr[442] << 16 | (uint32_t)mbr[443] << 24) != sig
+	    || mbr[446] != 0x80 || mbr[450] != 0x0c)
+		return inst_fail(S_PART, "the partition table did not come out as written");
+	logmsg("install: %s: start %" PRIu64 ", %" PRIu64 " sectors of %u bytes, disk signature %08x",
+	       part, pstart, psize, lbs, (unsigned)sig);
+
+	/* 2. FAT32, 8-sector clusters like the stick (bigger past FAT32's
+	   cluster count, i.e. on disks over 1 TiB) */
+	inst_step(S_FORMAT);
+	while (psize / cl > 0x0ffffff0UL && cl < 128)
+		cl *= 2;
+	snprintf(spc, sizeof spc, "%u", cl);
+	{
+		char *argv[] = { "/sbin/mkfs.vfat", "-F", "32", "-n", "ATARI", "-s", spc, part, NULL };
+		if (inst_run(argv, NULL, NULL, err, sizeof err) != 0)
+			return inst_fail(S_FORMAT, err);
+	}
+	if (!fat_serial(part, serial, sizeof serial))
+		return inst_fail(S_FORMAT, "no FAT32 on the new partition");
+	logmsg("install: %s formatted, serial %s, %u-sector clusters", part, serial, cl);
+
+	/* 3. copy the running media (the FAT, not /media/usb or /.host) */
+	inst_step(S_COPY);
+	inst_send("progress %d", inst_pct = 0);
+	mkdir_p(INSTALL_MNT, 0755);
+	umount2(INSTALL_MNT, MNT_DETACH); /* a failed earlier attempt */
+	if (mount(part, INSTALL_MNT, "vfat", MS_NOATIME | MS_NODEV | MS_NOSUID, "shortname=mixed") != 0) {
+		snprintf(err, sizeof err, "mount %s: %s", part, strerror(errno));
+		return inst_fail(S_COPY, err);
+	}
+	if (stat(MEDIA, &st) != 0 || statvfs(INSTALL_MNT, &sv) != 0) {
+		umount2(INSTALL_MNT, MNT_DETACH);
+		return inst_fail(S_COPY, "cannot stat the media");
+	}
+	sync();
+	inst_disk = disk;
+	inst_base = inst_written();
+	inst_total = 0;
+	d = opendir(MEDIA);
+	while (d && (e = readdir(d)) != NULL) {
+		char src[300];
+		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0 || strcmp(e->d_name, "usb") == 0)
+			continue;
+		snprintf(src, sizeof src, MEDIA "/%s", e->d_name);
+		inst_total += inst_tree_bytes(src, st.st_dev, (uint64_t)sv.f_bsize);
+	}
+	if (d)
+		closedir(d);
+	free_bytes = (uint64_t)sv.f_bavail * sv.f_frsize;
+	logmsg("install: copying %" PRIu64 " KiB, %" PRIu64 " KiB free", inst_total / 1024, free_bytes / 1024);
+	if (inst_total + (8u << 20) > free_bytes) {
+		umount2(INSTALL_MNT, MNT_DETACH);
+		return inst_fail(S_COPY, "the disk is too small");
+	}
+	d = opendir(MEDIA);
+	while (d && (e = readdir(d)) != NULL) {
+		char src[300];
+		struct stat est;
+		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0 || strcmp(e->d_name, "usb") == 0)
+			continue;
+		snprintf(src, sizeof src, MEDIA "/%s", e->d_name);
+		if (lstat(src, &est) != 0 || est.st_dev != st.st_dev)
+			continue; /* a mount point below /media */
+		{
+			char *argv[] = { BUSYBOX, "cp", "-a", src, INSTALL_MNT "/", NULL };
+			if (inst_run(argv, NULL, inst_copy_tick, err, sizeof err) != 0) {
+				closedir(d);
+				umount2(INSTALL_MNT, MNT_DETACH);
+				return inst_fail(S_COPY, err);
+			}
+		}
+		inst_copy_tick();
+	}
+	if (d)
+		closedir(d);
+	if (!exists(INSTALL_MNT "/limine-bios.sys") || !exists(INSTALL_MNT "/EFI/BOOT/BOOTX64.EFI")
+	    || !exists(INSTALL_MNT "/atari-os/modloop.sqfs")) {
+		umount2(INSTALL_MNT, MNT_DETACH);
+		return inst_fail(S_COPY, "the copy lacks the boot files");
+	}
+	if (inst_edit_conf(serial, err, sizeof err) != 0) {
+		umount2(INSTALL_MNT, MNT_DETACH);
+		return inst_fail(S_COPY, err);
+	}
+	{
+		/* most of the copy is still in the page cache: the progress
+		   keeps moving while it goes to the disk */
+		char *argv[] = { BUSYBOX, "sync", NULL };
+		inst_run(argv, NULL, inst_copy_tick, err, sizeof err);
+	}
+	if (umount(INSTALL_MNT) != 0) {
+		snprintf(err, sizeof err, "unmount: %s", strerror(errno));
+		umount2(INSTALL_MNT, MNT_DETACH);
+		return inst_fail(S_COPY, err);
+	}
+	inst_send("progress 100");
+	logmsg("install: copy done (%" PRIu64 " KiB)", inst_total / 1024);
+
+	/* 4. Limine's BIOS code into the MBR and the gap before 1 MiB */
+	inst_step(S_BOOT);
+	{
+		char *argv[] = { "/usr/bin/limine", "bios-install", dev, NULL };
+		if (inst_run(argv, NULL, NULL, err, sizeof err) != 0)
+			return inst_fail(S_BOOT, err);
+	}
+
+	/* 5. UEFI: a firmware entry, first in the boot order */
+	if (exists("/sys/firmware/efi") && exists(EFIVARS "/BootCurrent-" EFI_GLOBAL)) {
+		inst_step(S_EFI);
+		if (efi_install_entry(sig, pstart, psize, err, sizeof err) != 0)
+			return inst_fail(S_EFI, err);
+	}
+	else
+		logmsg("install: BIOS boot, no firmware entry needed");
+
+	/* 6. */
+	sync();
+	logmsg("install: done, %s boots on its own", dev);
+	inst_send("OK");
+	return 0;
+}
+
+/* "install <disk>": the work happens in a child; the socket stays with it. */
+static void cmd_install(int fd, const char *name)
+{
+	pid_t pid;
+	char line[160];
+	if (install_pid > 0) {
+		reply(fd, "ERR an install is already running\n");
+		return;
+	}
+	if (strcmp(media_kind, "stick") != 0 && strcmp(media_kind, "image-file") != 0) {
+		snprintf(line, sizeof line, "ERR install needs a running stick (media %s)\n", media_kind);
+		reply(fd, line);
+		return;
+	}
+	if (!install_candidate(name, NULL, NULL, 0)) {
+		snprintf(line, sizeof line, "ERR %.40s is not an internal disk that can be installed onto\n", name);
+		reply(fd, line);
+		return;
+	}
+	pid = fork();
+	if (pid < 0) {
+		reply(fd, "ERR fork failed\n");
+		return;
+	}
+	if (pid == 0) {
+		signal(SIGPIPE, SIG_IGN);
+		if (ctl_fd >= 0)
+			close(ctl_fd);
+		if (uevent_fd >= 0)
+			close(uevent_fd);
+		inst_sock = fd;
+		_exit(install_run(name));
+	}
+	install_pid = pid;
+	logmsg("install: /dev/%s, pid %d", name, (int)pid);
 }
 
 /* ---- control socket ------------------------------------------------------- */
@@ -1987,7 +2728,7 @@ static void cmd_status(int fd)
 	         ssh_pid > 0 ? "on" : "off",
 	         conf.rootpw[0] ? "set" : "none", efi_ok ? "yes" : "no", media_kind);
 	reply(fd, line);
-	snprintf(line, sizeof line, "usb %d\n", usb_count);
+	snprintf(line, sizeof line, "usb %d\ninstallable %d\n", usb_count, install_count());
 	reply(fd, line);
 	snprintf(line, sizeof line, "version %s\n", os_version);
 	reply(fd, line);
@@ -2273,6 +3014,10 @@ static void ctl_handle(int fd)
 		perf_logging = 0;
 		reply(fd, "OK\n");
 	}
+	else if (strcmp(line, "disks") == 0)
+		cmd_disks(fd);
+	else if (strncmp(line, "install ", 8) == 0)
+		cmd_install(fd, line + 8);
 	else if (strcmp(line, "bootnext") == 0)
 		reply(fd, efi_bootnext() == 0 ? "OK\n" : "ERR not booted from UEFI\n");
 	else if (strcmp(line, "logs") == 0) {
@@ -2420,6 +3165,15 @@ static void parse_cmdline(void)
 	if (strstr(buf, "atari.perf=1"))
 		perf_logging = -1; /* started with the main loop */
 	{
+		const char *p = strstr(buf, "atari.media=");
+		if (p) {
+			sscanf(p + strlen("atari.media="), "%15[0-9A-Fa-f-]", media_serial);
+			for (p = media_serial; *p; p++)
+				if (*p >= 'a' && *p <= 'f')
+					media_serial[p - media_serial] = (char)(*p - 'a' + 'A');
+		}
+	}
+	{
 		const char *p = strstr(buf, "atari.emudelay=");
 		if (p)
 			emudelay = atoi(p + strlen("atari.emudelay="));
@@ -2457,6 +3211,8 @@ int main(void)
 	sfd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
 
 	write_file("/proc/sys/kernel/printk", debug ? "7 4 1 7" : "3 3 1 3");
+	/* no rate limit on our own log lines (the installer writes a burst) */
+	write_file("/proc/sys/kernel/printk_devkmsg", "on");
 	write_file("/proc/sys/kernel/modprobe", "/bin/modprobe");
 	splash_open();
 	splash_line("Loading drivers...");
@@ -2614,6 +3370,10 @@ int main(void)
 						else if (pid == shell_pid) {
 							shell_pid = -1;
 							start_debug_shell();
+						}
+						else if (pid == install_pid) {
+							install_pid = -1;
+							logmsg("install: finished (status 0x%x)", status);
 						}
 						else if (pid == ssh_pid) {
 							ssh_pid = -1;

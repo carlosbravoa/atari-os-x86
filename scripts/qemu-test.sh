@@ -21,6 +21,17 @@
 #   QEMU_EXTRA="-drive if=none,id=usb2,format=raw,file=build/usb-test.img
 #     -device usb-storage,bus=xhci.0,drive=usb2,removable=on" scripts/qemu-test.sh start
 # QEMU_NONET=1 boots without any network card (FujiNet offline checks).
+#
+# The installer (F8 "Install onto this laptop's disk") needs internal disks
+# that survive the run: everything else is -snapshot, but each entry of
+# QEMU_DISK ("path[:ide|virtio|nvme]", space separated; default ide, i.e.
+# SATA on q35) is attached as a non-removable disk with snapshot=off.
+# scripts/mk-install-test.sh makes a blank one:
+#   QEMU_DISK="build/install-test.img" scripts/qemu-test.sh start uefi
+# QEMU_IMG_AS=ide|virtio|nvme attaches the main image as an internal disk instead
+# of a USB stick (booting an installed disk). QEMU_VARS=<file> gives OVMF a
+# persistent variable store (created from OVMF_VARS_4M.fd if missing), so
+# firmware boot entries outlive the run.
 
 set -eu
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -95,7 +106,41 @@ start)
 			[ -f "$f" ] && { FW="-drive if=pflash,format=raw,readonly=on,file=$f"; break; }
 		done
 		[ -n "$FW" ] || { echo "no OVMF firmware found (install ovmf or set OVMF_CODE)" >&2; exit 1; }
+		if [ -n "${QEMU_VARS:-}" ]; then
+			if [ ! -f "$QEMU_VARS" ]; then
+				for f in ${OVMF_VARS:-} /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+					/usr/share/edk2/ovmf/OVMF_VARS.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
+					[ -f "$f" ] && { cp "$f" "$QEMU_VARS"; break; }
+				done
+			fi
+			[ -f "$QEMU_VARS" ] || { echo "no OVMF variable store template (set OVMF_VARS)" >&2; exit 1; }
+			FW="$FW -drive if=pflash,format=raw,snapshot=off,file=$QEMU_VARS"
+		fi
 	fi
+	# SeaBIOS only tries the first hard disk: the image must be it. OVMF
+	# gets no bootindex, which would make it rewrite BootOrder from QEMU's.
+	BI=""; [ "$MODE" = uefi ] || BI=",bootindex=0"
+	case "${QEMU_IMG_AS:-usb}" in
+		usb) MAIN="-device usb-storage,bus=xhci.0,drive=stick,removable=on$BI" ;;
+		ide) MAIN="-device ide-hd,drive=stick$BI" ;;
+		virtio) MAIN="-device virtio-blk-pci,drive=stick$BI" ;;
+		nvme) MAIN="-device nvme,drive=stick,serial=atari-main$BI" ;;
+		*) echo "QEMU_IMG_AS: usb, ide, virtio or nvme" >&2; exit 1 ;;
+	esac
+	DISKS="" i=0
+	for spec in ${QEMU_DISK:-}; do
+		file=${spec%%:*} bus=ide
+		[ "$file" = "$spec" ] || bus=${spec##*:}
+		[ -f "$file" ] || { echo "QEMU_DISK: no file $file (scripts/mk-install-test.sh)" >&2; exit 1; }
+		case "$bus" in
+			ide) dev="ide-hd,drive=hd$i" ;;
+			virtio) dev="virtio-blk-pci,drive=hd$i" ;;
+			nvme) dev="nvme,drive=hd$i,serial=atari$i" ;;
+			*) echo "QEMU_DISK: $spec: bus must be ide, virtio or nvme" >&2; exit 1 ;;
+		esac
+		DISKS="$DISKS -drive if=none,id=hd$i,format=raw,snapshot=off,file=$file -device $dev"
+		i=$((i + 1))
+	done
 	ACCEL="-cpu max"; [ -w /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
 	NET="-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8000-:8000,hostfwd=tcp:127.0.0.1:2222-:22 -device e1000e,netdev=n0"
 	[ -n "${QEMU_NONET:-}" ] && NET="-nic none"
@@ -104,7 +149,7 @@ start)
 	nohup qemu-system-x86_64 $ACCEL $FW -m 1024 -smp 2 -machine q35 \
 		-device qemu-xhci,id=xhci \
 		-drive if=none,id=stick,format=raw,file="$IMG" \
-		-device usb-storage,bus=xhci.0,drive=stick,removable=on \
+		$MAIN $DISKS \
 		-device usb-kbd -vga std \
 		$NET \
 		-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
@@ -156,6 +201,12 @@ shot)
 	py mon "screendump $F -f png" 1.5 >/dev/null; ls -la "$F" ;;
 log) tail -n "${2:-40}" "$D/serial.log" ;;
 mon) py mon "$2" "${3:-1}" | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/\r//g' | grep -vF -e "$2" -e "(qemu)" || true ;;
-stop) [ -f "$D/qemu.pid" ] && kill "$(cat "$D/qemu.pid")" 2>/dev/null; rm -f "$D/qemu.pid"; echo stopped ;;
+stop)
+	# wait for it to go: an exiting QEMU unlinks its sockets, which may
+	# already be the next run's
+	if [ -f "$D/qemu.pid" ] && P=$(cat "$D/qemu.pid") && kill "$P" 2>/dev/null; then
+		i=0; while kill -0 "$P" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+	fi
+	rm -f "$D/qemu.pid"; echo stopped ;;
 *) echo "usage: $0 start|wait|serial|key|type|shot|log|mon|stop|debug-image" >&2; exit 1 ;;
 esac
