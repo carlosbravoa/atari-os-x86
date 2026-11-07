@@ -3,8 +3,9 @@
 #
 #   scripts/alpine-env.sh run scripts/mkimage.sh
 #
-# Produces build/atari-os.img: an MBR disk with one FAT32 partition that
-# boots on BIOS and UEFI through Limine. Layout of the stick:
+# Produces build/atari-os-x86-<version>.img (and build/atari-os.img, a hard
+# link to it, for the local scripts): an MBR disk with one FAT32 partition
+# that boots on BIOS and UEFI through Limine. Layout of the stick:
 #
 #   /EFI/BOOT/BOOTX64.EFI     UEFI loader (Limine)
 #   /limine-bios.sys          BIOS loader stage (plus code in the MBR)
@@ -12,16 +13,26 @@
 #   /atari-os/vmlinuz         Alpine linux-lts
 #   /atari-os/initramfs       our init + emulator + minimal driver set
 #   /atari-os/modloop.sqfs    full module set + firmware (squashfs)
+#   /atari-os/VERSION         the version string (also /etc/atari-os-release)
 #   /atari/                   the user's area: disks, carts, roms, config
 #
 # Everything above /atari is replaceable by copying a new build over it.
+#
+# Environment: ATARI_OS_VERSION overrides the version (default: git describe
+# --tags --always, plus -dirty for uncommitted changes in this repo; the
+# build's own patches inside the submodules do not count), IMG_MB the image
+# size, EXTRA_CMDLINE extra kernel options, SKIP_STAGE=1 reuses the
+# unpacked packages, DEV_SSH_KEY=0 leaves out the developer key (release
+# builds: an image that carries authorized_keys never makes the stick
+# holder's key), KEEP_OLD_IMAGES=1 keeps older build/atari-os-x86-*.img.
 
 set -eu
-WORK=/work
+PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f /etc/alpine-release ] || { echo "error: run me through scripts/alpine-env.sh run $0 (or in an Alpine container)" >&2; exit 1; }
+WORK=$PROJECT
 BUILD=$WORK/build
 STAGE=$BUILD/stage          # packages unpacked here
 INITRAMFS=$BUILD/initramfs  # initramfs tree
-OUT=$BUILD/atari-os.img
 IMG_MB=${IMG_MB:-1024}
 
 # fbdev_emulation=0: no fbcon on the panel, ever. The emulator owns the
@@ -42,6 +53,28 @@ INITRAMFS_MODULES="evdev usbhid hid-generic xhci-pci xhci-hcd ehci-pci ehci-hcd
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---- 0. version -----------------------------------------------------------
+if [ -z "${ATARI_OS_VERSION:-}" ]; then
+	if ATARI_OS_VERSION=$(git -C "$WORK" describe --tags --always 2>/dev/null); then
+		# Like --dirty, but the patches and symlinks build-emulator.sh and
+		# build-fujinet.sh put into the submodules are not "dirty".
+		git -C "$WORK" update-index -q --refresh >/dev/null 2>&1 || true
+		git -C "$WORK" diff-index --quiet --ignore-submodules=dirty HEAD -- 2>/dev/null \
+			|| ATARI_OS_VERSION="$ATARI_OS_VERSION-dirty"
+	else
+		ATARI_OS_VERSION=unknown
+	fi
+fi
+VERSION=$ATARI_OS_VERSION
+# It ends up in a file name, on the splash and in the menus.
+case "$VERSION" in
+	*[!A-Za-z0-9._+-]* | "" | -* | .*) die "bad version string '$VERSION' (letters, digits, . _ + - only)" ;;
+esac
+[ ${#VERSION} -le 40 ] || die "version string too long: $VERSION"
+OUT=$BUILD/atari-os-x86-$VERSION.img
+LINK=$BUILD/atari-os.img    # stable name for run-qemu.sh, qemu-test.sh, mk-ventoy-test.sh
+log "Version $VERSION"
 
 # ---- 1. unpack packages into the stage ------------------------------------
 if [ "${SKIP_STAGE:-0}" = 1 ] && [ -d "$STAGE/lib/modules" ]; then
@@ -144,6 +177,7 @@ printf 'blacklist snd_pcsp\nblacklist pcspkr\n' > "$INITRAMFS/etc/modprobe.d/bla
 # feel broken.
 printf 'options iwlmvm power_scheme=1\noptions iwlwifi power_save=0\n' > "$INITRAMFS/etc/modprobe.d/iwlwifi.conf"
 echo "atari" > "$INITRAMFS/etc/hostname"
+echo "$VERSION" > "$INITRAMFS/etc/atari-os-release"
 printf '127.0.0.1 localhost atari\n' > "$INITRAMFS/etc/hosts"
 
 copy_deps "$INITRAMFS/usr/bin/atari800"
@@ -206,6 +240,7 @@ cp /usr/share/limine/limine-bios.sys "$STICK/"
 cp "$STAGE/boot/vmlinuz-lts" "$STICK/atari-os/vmlinuz"
 cp "$BUILD/initramfs.zst" "$STICK/atari-os/initramfs"
 cp "$BUILD/modloop.sqfs" "$STICK/atari-os/modloop.sqfs"
+echo "$VERSION" > "$STICK/atari-os/VERSION"
 cat > "$STICK/limine.conf" <<EOF
 timeout: 0
 quiet: yes
@@ -227,14 +262,16 @@ EOF
 # image built here, so the builder can reach a laptop as soon as SSH is
 # switched on in the F8 menu (the laptop still generates its own key for
 # the stick holder when this file is absent).
-if [ ! -f "$BUILD/ssh/id_ed25519" ]; then
+if [ "${DEV_SSH_KEY:-1}" = 0 ]; then
+	log "No developer SSH key (DEV_SSH_KEY=0)"
+elif [ ! -f "$BUILD/ssh/id_ed25519" ]; then
 	mkdir -p "$BUILD/ssh"
 	dropbearkey -t ed25519 -f "$BUILD/ssh/id_ed25519.dropbear" >/dev/null 2>&1 \
 		&& dropbearconvert dropbear openssh "$BUILD/ssh/id_ed25519.dropbear" "$BUILD/ssh/id_ed25519" >/dev/null 2>&1 \
 		&& dropbearkey -y -f "$BUILD/ssh/id_ed25519.dropbear" 2>/dev/null | grep '^ssh-ed25519' > "$BUILD/ssh/id_ed25519.pub" \
 		&& chmod 600 "$BUILD/ssh/id_ed25519" || rm -f "$BUILD/ssh/id_ed25519"
 fi
-if [ -f "$BUILD/ssh/id_ed25519.pub" ]; then
+if [ "${DEV_SSH_KEY:-1}" != 0 ] && [ -f "$BUILD/ssh/id_ed25519.pub" ]; then
 	mkdir -p "$STICK/atari/ssh"
 	cp "$BUILD/ssh/id_ed25519.pub" "$STICK/atari/ssh/authorized_keys"
 	log "Developer SSH key authorised (build/ssh/id_ed25519)"
@@ -284,7 +321,14 @@ EOF
 
 # ---- 5. disk image --------------------------------------------------------
 log "Creating $OUT (${IMG_MB} MB)"
-rm -f "$OUT"
+rm -f "$OUT" "$LINK"
+if [ "${KEEP_OLD_IMAGES:-0}" != 1 ]; then
+	for old in "$BUILD"/atari-os-x86-*.img; do
+		[ -f "$old" ] || continue
+		log "Removing older image $(basename "$old")"
+		rm -f "$old"
+	done
+fi
 truncate -s "${IMG_MB}M" "$OUT"
 # One FAT32 partition (type 0c), bootable, starting at 1 MiB.
 printf 'label: dos\nstart=2048, type=c, bootable\n' | sfdisk -q "$OUT"
@@ -292,5 +336,8 @@ PART_OFFSET=$((2048 * 512))
 mformat -i "$OUT@@$PART_OFFSET" -F -v ATARI ::
 mcopy -i "$OUT@@$PART_OFFSET" -s -Q "$STICK"/* ::
 limine bios-install "$OUT" >/dev/null 2>&1
-ls -la "$OUT"
-log "Done. Boot with: scripts/run-qemu.sh [bios|uefi]"
+# A hard link, not a copy: no second GiB on disk; whatever writes to one
+# (run-qemu.sh boots without -snapshot) changes both.
+ln -f "$OUT" "$LINK"
+ls -la "$OUT" "$LINK"
+log "Done. $(basename "$OUT") ($VERSION). Boot with: scripts/run-qemu.sh [bios|uefi]"

@@ -11,13 +11,15 @@
 # data partition that holds nothing of ours except atari-os.img.
 
 set -eu
-BUILD=/work/build
+PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f /etc/alpine-release ] || { echo "error: run me through scripts/alpine-env.sh run $0 (or in an Alpine container)" >&2; exit 1; }
+BUILD=$PROJECT/build
 IMG=$BUILD/atari-os.img
 OUT=$BUILD/ventoy-test.img
 STICK=$BUILD/ventoy-stick
-SIZE_MB=1024
-
 [ -f "$IMG" ] || { echo "build atari-os.img first" >&2; exit 1; }
+# room for the image file, the kernel and initramfs, and FAT overhead
+SIZE_MB=$(( $(stat -c %s "$IMG") / 1048576 + 128 ))
 
 rm -rf "$STICK"
 mkdir -p "$STICK/EFI/BOOT" "$STICK/atari-os"

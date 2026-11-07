@@ -1,0 +1,185 @@
+# Build the image in Alpine, compile-check the C code against the host,
+# and boot the image in QEMU (BIOS and UEFI). release.yml runs this same
+# workflow for v* tags before it publishes anything.
+name: build
+
+on:
+  push:
+    branches: ['**']   # branches only: tags go through release.yml
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    # Same branch as ALPINE_BRANCH in scripts/alpine-env.sh: keep in step.
+    container: alpine:3.24
+    timeout-minutes: 90
+    steps:
+      # git before checkout (without it the action downloads a tarball,
+      # no .git, no submodules, no version); GNU tar for actions/cache.
+      - name: Tools for checkout and cache
+        run: apk add --no-cache git tar
+
+      - name: Trust the checkout (the workspace belongs to the runner user)
+        run: git config --global --add safe.directory '*'
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0   # tags, for git describe
+
+      - name: Build packages (the list scripts/alpine-env.sh bootstrap installs)
+        run: |
+          # shellcheck disable=SC2046 # one word per package
+          apk add --no-cache $(scripts/alpine-env.sh pkgs)
+
+      - name: Cache downloads (Mbed TLS)
+        uses: actions/cache@v4
+        with:
+          path: build/downloads
+          key: downloads-${{ hashFiles('scripts/build-fujinet.sh', 'scripts/alpine-env.sh') }}
+
+      - name: Emulator
+        run: scripts/build-emulator.sh
+
+      - name: FujiNet-PC
+        run: scripts/build-fujinet.sh
+
+      - name: Image
+        # No developer key: an image that carries authorized_keys would never
+        # generate the stick holder's own key.
+        env:
+          DEV_SSH_KEY: '0'
+        run: scripts/mkimage.sh
+
+      - name: Compress and checksum
+        run: |
+          cd build
+          img=$(ls atari-os-x86-*.img)
+          xz -T0 -6 -k -f "$img"
+          sha256sum "$img.xz" > SHA256SUMS
+          cat SHA256SUMS
+          ls -la "$img" "$img.xz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: |
+            build/atari-os-x86-*.img.xz
+            build/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0   # already xz
+
+  host-build:
+    # The -Werror check: atari800's configure appends -Werror, and the port
+    # builds with -ansi -pedantic, so non-C89 code fails here. Same as
+    # build/atari800-host locally.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config \
+            libdrm-dev libasound2-dev zlib1g-dev
+
+      - name: Emulator against the host libraries
+        run: |
+          SRC="$GITHUB_WORKSPACE/third_party/atari800"
+          # what scripts/build-emulator.sh does before configuring
+          ln -sfn ../../../emulator/kms "$SRC/src/kms"
+          ln -sfn ../../../emulator/sound_alsa.c "$SRC/src/sound_alsa.c"
+          for p in "$GITHUB_WORKSPACE"/emulator/patches/*.patch; do
+            git -C "$SRC" apply "$p"
+          done
+          (cd "$SRC" && autoreconf -fi)
+          mkdir -p build/atari800-host
+          cd build/atari800-host
+          "$SRC/configure" --with-video=kms --with-sound=alsa --enable-netsio \
+            --without-readline --without-x --with-png=no --with-mp3=no --with-zlib=yes \
+            --disable-monitorbreak --disable-monitortrace \
+            CFLAGS="-g -O2 -I$GITHUB_WORKSPACE/common"
+          make -j"$(nproc)"
+
+      - name: init, static
+        run: gcc -static -Os -Wall -Wextra -Werror -Icommon -o "$RUNNER_TEMP/init" init/init.c
+
+  smoke:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4   # for scripts/qemu-test.sh
+
+      - name: QEMU, OVMF, mtools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf mtools
+
+      - name: KVM for the runner user
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+          if [ -w /dev/kvm ]; then echo "KVM available"; else echo "no KVM: TCG, waiting up to 600 s"; fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: build
+
+      - name: Unpack
+        run: |
+          cd build
+          sha256sum -c SHA256SUMS
+          unxz atari-os-x86-*.img.xz
+          ls -la
+
+      - name: Serial debug shell for the test (this copy only)
+        run: scripts/qemu-test.sh debug-image "$(ls build/atari-os-x86-*.img)"
+
+      - name: Boot BIOS and UEFI
+        run: |
+          QEMU_IMG=$(ls build/atari-os-x86-*.img)
+          export QEMU_IMG
+          rc=0
+          for mode in bios uefi; do
+            export QEMU_TEST_DIR="$GITHUB_WORKSPACE/build/qemu-test/$mode"
+            echo "::group::$mode"
+            scripts/qemu-test.sh start "$mode"
+            if scripts/qemu-test.sh wait; then
+              sleep 5
+              scripts/qemu-test.sh serial 'echo status | nc local:/run/atari.ctl' 3 | tee "$QEMU_TEST_DIR/status.txt"
+              grep -q '^version ' "$QEMU_TEST_DIR/status.txt" || { echo "::error::$mode: no version in the status reply"; rc=1; }
+            else
+              echo "::error::$mode: the emulator never started"
+              rc=1
+            fi
+            scripts/qemu-test.sh shot "$QEMU_TEST_DIR/screen.png" || true
+            scripts/qemu-test.sh stop
+            echo "::endgroup::"
+          done
+          exit $rc
+
+      - name: Screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke
+          path: |
+            build/qemu-test/*/*.png
+            build/qemu-test/*/*.log
+            build/qemu-test/*/*.txt
+            build/qemu-test/*/qemu.out
+          if-no-files-found: warn

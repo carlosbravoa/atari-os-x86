@@ -113,6 +113,8 @@ static struct {
 } conf = { 0, 0, "" };
 static int efi_ok = 0;
 static char media_kind[32] = "none";
+/* Build version, one line in /etc/atari-os-release (scripts/mkimage.sh). */
+static char os_version[48] = "unknown";
 
 /* ---- logging --------------------------------------------------------- */
 
@@ -364,7 +366,12 @@ static void splash_redraw(void)
 		for (x = 0; x < splash.w; x++)
 			*(uint32_t *)(splash.map + yy * splash.pitch + x * 4) = SPLASH_BG;
 	splash_text(64, 48, 3, "atari-os-x86", SPLASH_FG);
-	y = 48 + 24 + 24;
+	{
+		char ver[64];
+		snprintf(ver, sizeof ver, "atari-os-x86 %s", os_version);
+		splash_text(64, 48 + 24 + 24, 2, ver, SPLASH_FG);
+	}
+	y = 48 + 24 + 24 + 16 + 24;
 	for (i = 0; i < splash.nlines; i++, y += 20)
 		splash_text(64, y, 2, splash.lines[i], SPLASH_FG);
 	/* Shadow-buffered drivers (simpledrm, bochs) only show changes on a
@@ -1657,6 +1664,8 @@ static void cmd_status(int fd)
 	reply(fd, line);
 	snprintf(line, sizeof line, "usb %d\n", usb_count);
 	reply(fd, line);
+	snprintf(line, sizeof line, "version %s\n", os_version);
+	reply(fd, line);
 
 	/* first non-loopback IPv4 address */
 	{
@@ -2085,7 +2094,9 @@ int main(void)
 
 	kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	parse_cmdline();
-	logmsg("atari-os-x86 init starting%s", debug ? " (debug)" : "");
+	if (read_file("/etc/atari-os-release", os_version, sizeof os_version) <= 0)
+		snprintf(os_version, sizeof os_version, "unknown");
+	logmsg("atari-os-x86 %s init starting%s", os_version, debug ? " (debug)" : "");
 
 	/* Ctrl+Alt+Del and SIGTERM come to us; children are reaped below. */
 	reboot(LINUX_REBOOT_CMD_CAD_OFF);

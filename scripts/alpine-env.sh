@@ -8,6 +8,13 @@
 #   scripts/alpine-env.sh bootstrap        download minirootfs, install build deps
 #   scripts/alpine-env.sh run <cmd...>     run a command inside, project at /work
 #   scripts/alpine-env.sh shell            interactive shell inside
+#   scripts/alpine-env.sh pkgs             print the build package list (for CI)
+#
+# The build scripts (build-emulator.sh, build-fujinet.sh, mkimage.sh) find
+# the project from their own location, so the same scripts also run in a
+# plain Alpine container: CI does `apk add $(scripts/alpine-env.sh pkgs)`
+# in an alpine:<ALPINE_BRANCH> container (.github/workflows/build.yml; keep
+# its image tag in step with ALPINE_BRANCH).
 #
 # Only the Alpine branch and the package list below are policy; the rest is
 # plumbing. Downloads are verified against the release manifest's sha256.
@@ -23,10 +30,15 @@ BUILD="$PROJECT/build"
 ROOT="$BUILD/alpine"
 DL="$BUILD/downloads"
 
-# Packages for building our own code and assembling the image.
+# Packages for building our own code and assembling the image: the
+# emulator; FujiNet-PC (cmake/ninja, python for its web UI generator, expat
+# and OpenSSL for libssh); the image (limine, sfdisk, mtools, squashfs,
+# dropbear for the developer key, xz for release compression).
 BUILD_PKGS="alpine-base build-base autoconf automake libtool pkgconf git
             linux-headers libdrm-dev alsa-lib-dev zlib-dev
-            cpio squashfs-tools mtools xorriso dosfstools zstd curl"
+            cmake samurai python3 py3-jinja2 py3-yaml expat-dev openssl-dev argp-standalone
+            cpio squashfs-tools mtools xorriso dosfstools sfdisk zstd xz curl
+            limine limine-bios limine-efi-x86_64 dropbear dropbear-convert"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -97,12 +109,20 @@ exec_or_run() {
 	if [ "${EXEC_LAST:-0}" = 1 ]; then exec "$@"; else "$@"; fi
 }
 
-[ "${1:-}" = "--inside" ] || { [ $# -gt 0 ] || die "usage: $0 bootstrap|run <cmd>|shell"; in_userns "$@"; }
+# Printed before any namespace work: CI calls it in a container without
+# user namespaces (and before anything is bootstrapped).
+if [ "${1:-}" = pkgs ]; then
+	# shellcheck disable=SC2086
+	echo $BUILD_PKGS
+	exit 0
+fi
+
+[ "${1:-}" = "--inside" ] || { [ $# -gt 0 ] || die "usage: $0 bootstrap|run <cmd>|shell|pkgs"; in_userns "$@"; }
 shift
 
 case "${1:-}" in
 	bootstrap) bootstrap ;;
 	run) shift; EXEC_LAST=1 run_inside "$@" ;;
 	shell) EXEC_LAST=1 run_inside /bin/sh -l ;;
-	*) die "usage: $0 bootstrap|run <cmd>|shell" ;;
+	*) die "usage: $0 bootstrap|run <cmd>|shell|pkgs" ;;
 esac

@@ -302,6 +302,8 @@ static void hardware_page(const char *status)
 	size_t n = 0;
 	FILE *f;
 
+	status_get(status, "version", v, sizeof v, "?");
+	add_line(page, &n, sizeof page, "Version: %.29s", v);
 	read_line("/sys/class/dmi/id/product_name", v, sizeof v);
 	read_line("/sys/class/dmi/id/sys_vendor", w, sizeof w);
 	add_line(page, &n, sizeof page, "%.16s %.20s", w, v);

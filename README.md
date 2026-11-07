@@ -12,6 +12,40 @@ needs.
 Inspired by [bma8](https://github.com/serkantanriverdi/bma8) (bare-metal Atari
 on Raspberry Pi) and [AltirraSDL](https://github.com/ilmenit/AltirraSDL).
 
+## Install
+
+Download `atari-os-x86-<version>.img.xz` from the latest
+[release](../../releases/latest) (and `flash.sh` if you are on Linux or
+macOS), then write it to a USB stick or SD card of 1 GB or more. Writing
+erases the stick. Pick one:
+
+- **Windows**: [balenaEtcher](https://etcher.balena.io/) writes the
+  `.img.xz` as it is; [Rufus](https://rufus.ie/) works too, on the
+  unpacked `.img` (7-Zip), in **DD mode**.
+- **Linux and macOS**: `flash.sh` only ever offers USB sticks and SD cards
+  (never a disk holding `/`, `/home`, swap and the like, nothing over
+  512 GiB), makes you type the device name and `yes`, then writes and reads
+  the stick back to verify it:
+
+  ```sh
+  bash flash.sh atari-os-x86-v0.1.0.img.xz
+  ```
+
+  `--dry-run` shows the disks and the plan without writing; `--help` for
+  the rest. macOS needs `xz` (`brew install xz`) for the `.xz` file.
+- **Ventoy**: `unxz` the file and copy the `.img` onto the Ventoy stick
+  like any other image; pick it from the Ventoy menu.
+
+Then boot the laptop from USB: open its boot menu while it starts (usually
+F12; F9 on HP, Esc or F8 on ASUS) and pick the stick. On UEFI machines
+Secure Boot must be off. The Atari comes up at `READY`; **F8** is the System
+menu, **F9** the Library.
+
+The stick stays an ordinary, writable FAT32 drive: your library, settings
+and FujiNet's SD folder live in its `atari/` folder, and you can add files
+from any computer. The image is 1 GiB; the rest of a bigger stick stays
+unused for now.
+
 ## How it works
 
 ```
@@ -173,14 +207,43 @@ without root through user namespaces. Needs: `unshare` (util-linux), `curl`,
 scripts/alpine-env.sh bootstrap                  # once
 scripts/alpine-env.sh run scripts/build-emulator.sh
 scripts/alpine-env.sh run scripts/build-fujinet.sh   # optional, needs network
-scripts/alpine-env.sh run scripts/mkimage.sh     # -> build/atari-os.img
+scripts/alpine-env.sh run scripts/mkimage.sh     # -> build/atari-os-x86-<version>.img
 scripts/run-qemu.sh bios                         # or: uefi
 ```
 
-Write `build/atari-os.img` to a USB stick with `dd` (or any imaging tool).
+The build scripts find the project from their own location and refuse to
+run outside Alpine; `scripts/alpine-env.sh pkgs` prints the package list,
+which is all a plain `alpine` container needs (that is what CI does).
+
+The version is `git describe --tags --always` plus `-dirty` for uncommitted
+changes in this repository (the build's own patches inside the submodules
+do not count); `ATARI_OS_VERSION` overrides it. It is in the image name,
+in `/atari-os/VERSION` on the stick and `/etc/atari-os-release` in the
+initramfs, on the boot splash, on the System menu's hardware page and in
+init's `status` reply. `build/atari-os.img` is a hard link to the newest
+image, for the local scripts; older `build/atari-os-x86-*.img` are removed
+(`KEEP_OLD_IMAGES=1` keeps them). `DEV_SSH_KEY=0` leaves the developer key
+out (release images).
+
+Write the image with `scripts/flash.sh build/atari-os.img` (see Install).
 Secure Boot must be disabled on UEFI machines.
 
-**Ventoy:** copy `atari-os.img` onto a Ventoy stick as a file and pick it
+### Releases and CI
+
+`.github/workflows/build.yml` runs on every push and pull request: the image
+in an `alpine:3.24` container (uploaded as the `image` artifact, `.img.xz`
+plus `SHA256SUMS`), the emulator against Ubuntu's libraries with
+`-Werror` (the C89 check) plus a static `init`, and a smoke boot of the
+image in QEMU, BIOS and UEFI, that fails unless the emulator starts
+(screenshots and serial logs in the `smoke` artifact). Pushing a `v*` tag
+runs `release.yml`: the same workflow, then a GitHub release with the
+image, `SHA256SUMS` and `flash.sh`, its text from
+`.github/release-template.md` above the generated notes. `CHANGELOG.md`
+lists the changes. `tests/flash-test.sh` tests `flash.sh` without touching
+any disk (`--to-file` and a faked disk list).
+
+**Ventoy:** copy the image (`atari-os-x86-<version>.img`, or
+`build/atari-os.img`) onto a Ventoy stick as a file and pick it
 from the Ventoy menu (Legacy or UEFI). After the kernel starts, init looks
 for an `atari-os*.img` file on every partition (FAT, exFAT, NTFS),
 loop-mounts it and uses the FAT inside as the stick, so config and FujiNet
@@ -193,10 +256,13 @@ console and verbose kernel messages.
 ### Headless testing
 
 `scripts/qemu-test.sh` drives QEMU without a display: `start [bios|uefi]`,
-`key <name>` (QEMU sendkey names), `shot <png>`, `serial "<cmd>"` (runs a
-command on the debug shell), `log`, `mon "<cmd>"` (QEMU monitor), `stop`.
-Build a debug image with
-`EXTRA_CMDLINE="console=ttyS0,115200 atari.debug=1"` for `serial` to work.
+`wait [seconds]` (until the emulator runs), `key <name>` (QEMU sendkey
+names), `shot <png>`, `serial "<cmd>"` (runs a command on the debug shell),
+`log`, `mon "<cmd>"` (QEMU monitor), `stop`. `QEMU_IMG` picks another image,
+`OVMF_CODE` the UEFI firmware. Build a debug image with
+`EXTRA_CMDLINE="console=ttyS0,115200 atari.debug=1"` for `serial` to work,
+or turn a release image into one with `qemu-test.sh debug-image <img>`
+(edits its `limine.conf`; needs mtools).
 `type "<text>"` types a string, one `sendkey` per character on a US layout
 (`\n` is RETURN; `QEMU_TYPE_DELAY`, default 0.15 s, between keys), which is
 how ASH is driven headless, e.g. `scripts/qemu-test.sh type 'ls sd:/\n'`.

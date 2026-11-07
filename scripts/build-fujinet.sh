@@ -10,15 +10,20 @@
 # fujinet/patches/ are applied to the submodule before building.
 
 set -eu
-SRC=/work/third_party/fujinet-firmware
-OUT=/work/build/fujinet
-MBED=/work/build/mbedtls3
-DL=/work/build/downloads
-MBEDTLS_VERSION="${MBEDTLS_VERSION:-3.6.3}"
+PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f /etc/alpine-release ] || { echo "error: run me through scripts/alpine-env.sh run $0 (or in an Alpine container)" >&2; exit 1; }
+SRC=$PROJECT/third_party/fujinet-firmware
+OUT=$PROJECT/build/fujinet
+MBED=$PROJECT/build/mbedtls3
+DL=$PROJECT/build/downloads
+# 3.6.3.1 is the 3.6.3 LTS re-release (its headers say 3.6.3); the tarball
+# is checked against this sha256 (override both together).
+MBEDTLS_VERSION="${MBEDTLS_VERSION:-3.6.3.1}"
+MBEDTLS_SHA256="${MBEDTLS_SHA256:-243ed496d5f88a5b3791021be2800aac821b9a4cc16e7134aa413c58b4c20e0c}"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
-for p in /work/fujinet/patches/*.patch; do
+for p in "$PROJECT"/fujinet/patches/*.patch; do
 	[ -f "$p" ] || continue
 	if git -C "$SRC" apply --check --reverse "$p" >/dev/null 2>&1; then
 		continue
@@ -31,11 +36,15 @@ if [ ! -f "$MBED/lib/libmbedtls.a" ]; then
 	log "Building Mbed TLS $MBEDTLS_VERSION"
 	mkdir -p "$DL"
 	tb="$DL/mbedtls-$MBEDTLS_VERSION.tar.bz2"
-	[ -f "$tb" ] || curl -fsSL -o "$tb" \
-		"https://github.com/Mbed-TLS/mbedtls/releases/download/v$MBEDTLS_VERSION/mbedtls-$MBEDTLS_VERSION.tar.bz2"
+	if [ ! -f "$tb" ]; then
+		curl -fsSL -o "$tb.part" \
+			"https://github.com/Mbed-TLS/mbedtls/releases/download/v$MBEDTLS_VERSION/mbedtls-$MBEDTLS_VERSION.tar.bz2"
+		mv "$tb.part" "$tb"
+	fi
+	[ "$(sha256sum "$tb" | cut -d' ' -f1)" = "$MBEDTLS_SHA256" ] || { echo "error: checksum mismatch for $tb" >&2; exit 1; }
 	rm -rf "$DL/src-mbedtls"
 	mkdir -p "$DL/src-mbedtls"
-	tar -xjf "$tb" -C "$DL/src-mbedtls" --strip-components=1
+	tar --no-same-owner -xjf "$tb" -C "$DL/src-mbedtls" --strip-components=1
 	cmake -G Ninja -S "$DL/src-mbedtls" -B "$DL/src-mbedtls/b" \
 		-DCMAKE_BUILD_TYPE=Release -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
 		-DUSE_SHARED_MBEDTLS_LIBRARY=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \

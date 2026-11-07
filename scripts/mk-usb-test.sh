@@ -12,6 +12,7 @@
 
 set -eu
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f /etc/alpine-release ] || { echo "error: run me through scripts/alpine-env.sh run $0 (or in an Alpine container)" >&2; exit 1; }
 BUILD=$PROJECT/build
 OUT=$BUILD/usb-test.img
 TREE=$BUILD/usb-test
