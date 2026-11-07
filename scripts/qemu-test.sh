@@ -65,7 +65,7 @@ start)
 		-chardev socket,id=ser,path="$D/serial.sock",server=on,wait=off,logfile="$D/serial.log" \
 		-serial chardev:ser \
 		-monitor unix:"$D/mon.sock",server,nowait \
-		-display none -no-reboot > "$D/qemu.out" 2>&1 &
+		-snapshot -display none -no-reboot > "$D/qemu.out" 2>&1 &
 	echo $! > "$D/qemu.pid"
 	echo "started pid $(cat "$D/qemu.pid")"
 	;;
