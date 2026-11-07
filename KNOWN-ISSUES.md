@@ -24,3 +24,19 @@
   then TLS (HTTPS hosts in FujiNet) fails.
 - **amdgpu firmware** makes the modloop ~400 MB; per-GPU trimming is
   pending.
+
+## ASH: copying or saving to h: fails (ASH 1.3 TN bug)
+
+`cp … h:name`, `mv … h:name` and the editor's save on `h:` fail with an I/O
+error (129). Cause: in ASH's `fileops.s` `w_open`, the TN build's `bne wo_d`
+after the `sd:` check tests the flags left by `cmp #5`, not the drive, so
+an `h:` destination takes the disk (CIO) path. Fix belongs in ASH: `lda
+wdev` before `bne wo_d`; then rebuild `release/ASH-TN.*`/`ASH.CAR` and bump
+the submodule. Reads from `h:`, `ls`, `cat`, `run`, `cp h: → sd:`/disk,
+`rm`/`mv` on `h:` and everything on `sd:` work.
+
+## ASH: saving the atari800 configuration while in ASH mode keeps the cartridge
+
+atari800's "Save configuration" (F1 menu) writes `CARTRIDGE_FILENAME=ASH.CAR`
+into `atari/config/atari800.cfg`; switching "Boot into" back to BASIC then
+still boots ASH until that line is removed. init does not clear it yet.

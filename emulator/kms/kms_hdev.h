@@ -1,0 +1,26 @@
+/*
+ * kms/kms_hdev.h - ASH's h:/sd: device: SIO device $72 backed by the stick
+ *
+ * Part of atari-os-x86. See kms_video.h for the licence note.
+ */
+#ifndef KMS_KMS_HDEV_H_
+#define KMS_KMS_HDEV_H_
+
+#include "atari.h" /* UBYTE, UWORD */
+
+/* Called from SIO_Handler() (sio.c, SIO patch) for DDEVIC $72. Moves
+   `length` bytes between the Atari's memory at `data` and the host.
+   Returns 'C' (complete), 'E' (error) or 'N' (NAK: unknown/malformed). */
+UBYTE KMS_HDEV_Handler(int cmd, int aux1, int aux2, UWORD data, int length);
+
+/* Once per frame from the main loop: runs a deferred MOUNT/UNMOUNT/CART/
+   BOOT request (never done inside the SIO handler). */
+void KMS_HDEV_Poll(void);
+
+/* Called from Atari800_Coldstart(): sd: writes are switched off again. */
+void KMS_HDEV_ColdStart(void);
+
+/* "basic", "ash" or "fujinet", for the XIO 45 status listing. */
+void KMS_HDEV_SetBootTarget(const char *target);
+
+#endif /* KMS_KMS_HDEV_H_ */

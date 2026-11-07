@@ -7,7 +7,8 @@
 #
 # A 64 MB MBR disk with one FAT partition labelled GAMES, for exercising the
 # Library (F9): USB mounting in init, the USB tab, Run, Copy to Library,
-# zip files (GAMES/PACK.ZIP, GAMES/MULTI.ZIP, GAMES/BAD.ZIP).
+# zip files (GAMES/PACK.ZIP, GAMES/MULTI.ZIP, GAMES/BAD.ZIP), and ASH's
+# sd: device (DISKS/X.ATR for "mount d2:").
 
 set -eu
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,10 +21,11 @@ A8=$PROJECT/third_party/atari800
 [ -f "$FUJI/autorun.atr" ] || { echo "need $FUJI/autorun.atr (scripts/build-fujinet.sh)" >&2; exit 1; }
 
 rm -rf "$TREE"
-mkdir -p "$TREE/GAMES/MORE" "$TREE/DEMOS"
+mkdir -p "$TREE/GAMES/MORE" "$TREE/DEMOS" "$TREE/DISKS"
 cp "$A8/util/colors.xex" "$TREE/GAMES/HELLO.XEX"
 cp "$A8/util/colormix.xex" "$TREE/GAMES/MORE/COLORMIX.XEX"
 cp "$FUJI/autorun.atr" "$TREE/DEMOS/A.ATR"
+cp "$FUJI/autorun-cng.atr" "$TREE/DISKS/X.ATR"
 printf 'Test drive for the atari-os-x86 Library (F9).\r\n' > "$TREE/README.TXT"
 # Zips for the Library's zip support: a folder with one stored and one
 # deflated entry (plus a text file it must hide), a two-disk set, and a

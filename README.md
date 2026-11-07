@@ -39,6 +39,8 @@ core is the planned second core.
 /atari-os/vmlinuz  initramfs  modloop.sqfs      ← the system (replace to update)
 /atari/library  disks  carts  roms  config      ← yours
 /atari/fujinet/fnconfig.ini  SD/                ← FujiNet's config and "SD card"
+/atari/ash/ASH.CAR  ASH.XEX  ASH.ATR            ← ASH, the Atari shell
+/atari/hdd/                                     ← ASH's h: drive
 ```
 
 Drop your collection (any folders, any Atari files) in `library/`, and
@@ -64,13 +66,14 @@ A filter entry narrows the listing to matching file names.
 The laptop boots straight to BASIC `READY`. F8 opens a menu in the same
 style as the emulator's own, backed by PID 1 over a Unix socket:
 
-- **FujiNet boot** on/off: restarts the Atari into FujiNet CONFIG (persists)
+- **Boot into**: BASIC, ASH (the Atari shell) or FujiNet CONFIG; choosing
+  another one restarts the Atari into it (persists)
 - **Volume** and **Brightness** sliders (persist in the emulator config)
 - **Wi-Fi**: scan, pick a network, type the password; `wpa_supplicant`
   keeps the network in `atari/config/wpa_supplicant.conf`
 - **Remote access (SSH)** on/off, **SSH password** (keys only until set)
 - **Hardware status** page: machine, CPU, RAM, video driver and mode,
-  sound card, Wi-Fi, IP, battery, boot medium, kernel
+  sound card, Wi-Fi, IP, battery, boot medium, boot target, kernel
 - **Reboot straight back into Atari** (UEFI `BootNext`, a one-shot request
   for the next start only; the machine's boot order is never touched)
 - Save logs to the stick, restart emulator, reboot, **shut down** (besides
@@ -93,7 +96,36 @@ From another machine:
 ssh -i /media/$USER/ATARI/atari/ssh/id_ed25519 root@<ip shown in the menu>
 ```
 
-Settings live in `atari/config/system.conf` (`fujinet=`, `ssh=`).
+Settings live in `atari/config/system.conf` (`boot=basic|ash|fujinet`,
+`ssh=`; an older `fujinet=1` is read as `boot=fujinet`).
+
+## ASH
+
+[ASH](https://github.com/carlosbravoa/atari800-atari-shell) is a Unix-style
+shell for the Atari that replaces the DOS menu: `ls`, `cd`, `cat`, `cp`,
+`mv`, `rm`, `run`, `mount`, an editor, `help` for the rest. It is a
+submodule (`third_party/atari800-atari-shell`); the stick carries its
+prebuilt cartridge and program in `atari/ash/`. **Boot into: ASH** in the
+F8 menu inserts `ASH.CAR` and restarts; RESET in a program started from
+ASH returns to the shell, `basic` leaves it, `reboot` cold-starts into it
+again.
+
+ASH was written for the Tang Nano 20K FPGA Atari, whose SD card it reaches
+through an SIO file device ($72). The emulator provides that device here,
+backed by the stick:
+
+- `h:` is the folder `atari/hdd/`: flat, 8.3 names (`ls h:`, `cat h:readme.txt`).
+- `sd:` is the stick and the USB drives: `sd:/atari/...` is the stick's
+  `atari/` folder, `sd:/usb/<drive>/...` a USB drive. `mount d2: sd:/...`
+  mounts a disk image (a `.xex` on D1: is run), `umount d2:`, `mount`
+  alone lists what is mounted, `cart sd:/...` inserts a cartridge and
+  restarts.
+- Writing to `sd:` is off until `sd rw` (until the next cold start);
+  `atari/ash/`, `atari/config/`, mounted disks and the inserted cartridge
+  are never written.
+
+The device rides atari800's SIO patch, so it is absent in FujiNet mode
+(NetSIO); ASH then shows no `h:`.
 
 ## FujiNet
 
@@ -165,6 +197,9 @@ console and verbose kernel messages.
 command on the debug shell), `log`, `mon "<cmd>"` (QEMU monitor), `stop`.
 Build a debug image with
 `EXTRA_CMDLINE="console=ttyS0,115200 atari.debug=1"` for `serial` to work.
+`type "<text>"` types a string, one `sendkey` per character on a US layout
+(`\n` is RETURN; `QEMU_TYPE_DELAY`, default 0.15 s, between keys), which is
+how ASH is driven headless, e.g. `scripts/qemu-test.sh type 'ls sd:/\n'`.
 `QEMU_EXTRA` adds QEMU arguments; `scripts/mk-usb-test.sh` builds
 `build/usb-test.img`, a USB drive with Atari files for the Library:
 

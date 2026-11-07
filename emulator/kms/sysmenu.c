@@ -5,7 +5,7 @@
  * ALSA and evdev with no display server or SDL in between.
  *
  * Drawn with atari800's own UI toolkit, so it looks like the F1 menu.
- * Anything that needs root-level system control (FujiNet boot mode,
+ * Anything that needs root-level system control (the boot target,
  * Wi-Fi, SSH, reboot, power off) is a one-line request to PID 1 over the
  * Unix socket /run/atari.ctl; volume and backlight are set directly.
  *
@@ -38,11 +38,13 @@
 #include "platform.h"
 #include "ui.h"
 #include "util.h"
+#include "kms/kms_hdev.h"
 #include "kms/kms_sysmenu.h"
 #include "kms/kms_video.h"
 #include <sys/utsname.h>
 
 #define CTL_SOCK "/run/atari.ctl"
+#define ASH_CART "/media/atari/ash/ASH.CAR" /* ASH_CART in init/init.c */
 
 int KMS_SYSMENU_requested = FALSE;
 int KMS_SYSMENU_volume = -1;
@@ -123,6 +125,24 @@ static const char *status_get(const char *status, const char *key, char *out, si
 	}
 	Util_strlcpy(out, def, size);
 	return out;
+}
+
+/* The boot target from a status reply: "basic", "ash" or "fujinet"
+   (an init from before "boot" only says "fujinet on|off"). */
+static const char *boot_of(const char *status, char *out, size_t size)
+{
+	char fuji[16];
+	status_get(status, "fujinet", fuji, sizeof fuji, "off");
+	return status_get(status, "boot", out, size, strcmp(fuji, "on") == 0 ? "fujinet" : "basic");
+}
+
+static const char *boot_label(const char *target)
+{
+	if (strcmp(target, "ash") == 0)
+		return "ASH";
+	if (strcmp(target, "fujinet") == 0)
+		return "FujiNet CONFIG";
+	return "BASIC";
 }
 
 /* ---- backlight ------------------------------------------------------- */
@@ -229,6 +249,16 @@ void KMS_SYSMENU_ApplySettings(void)
 		hinted = TRUE;
 		KMS_VIDEO_SetHint("F8 = System menu    F1 = Emulator menu", 25.0);
 	}
+	{
+		/* once: ASH's "mount" listing shows the boot target */
+		static int asked = FALSE;
+		char status[1024], buf[16];
+		if (!asked) {
+			asked = TRUE;
+			if (ctl_request("status", status, sizeof status))
+				KMS_HDEV_SetBootTarget(boot_of(status, buf, sizeof buf));
+		}
+	}
 }
 
 /* ---- hardware status page -------------------------------------------- */
@@ -314,10 +344,10 @@ static void hardware_page(const char *status)
 		add_line(page, &n, sizeof page, "Battery: %s%%", v);
 	status_get(status, "media", v, sizeof v, "?");
 	status_get(status, "efi", w, sizeof w, "?");
-	add_line(page, &n, sizeof page, "Boot: %s, UEFI %s", v, w);
-	status_get(status, "fujinet", v, sizeof v, "?");
+	add_line(page, &n, sizeof page, "Stick: %s, UEFI %s", v, w);
+	boot_of(status, v, sizeof v);
 	status_get(status, "ssh", w, sizeof w, "?");
-	add_line(page, &n, sizeof page, "FujiNet boot %s, SSH %s", v, w);
+	add_line(page, &n, sizeof page, "Boot: %s, SSH %s", boot_label(v), w);
 	{
 		struct utsname u;
 		if (uname(&u) == 0)
@@ -567,6 +597,45 @@ static void wifi_menu(void)
 	}
 }
 
+/* "Boot into": BASIC, ASH or FujiNet CONFIG. Choosing another one makes
+   init save it and restart the emulator; TRUE when that is under way. */
+static int boot_menu(const char *current)
+{
+	static const char *const names[] = { "basic", "ash", "fujinet" };
+	static char ash_item[32];
+	UI_tMenuItem menu[] = {
+		UI_MENU_ACTION(1, "BASIC"),
+		UI_MENU_ACTION(2, ash_item),
+		UI_MENU_ACTION(3, "FujiNet CONFIG"),
+		UI_MENU_END
+	};
+	char cmd[32], reply[512], line[64];
+	int have_ash = Util_fileexists(ASH_CART);
+	int cur = 1, choice;
+
+	if (strcmp(current, "ash") == 0)
+		cur = 2;
+	else if (strcmp(current, "fujinet") == 0)
+		cur = 3;
+	Util_strlcpy(ash_item, have_ash ? "ASH" : "ASH (not installed)", sizeof ash_item);
+	choice = UI_driver->fSelect("Boot into", UI_SELECT_POPUP, cur, menu, NULL);
+	if (choice < 1 || choice == cur)
+		return FALSE;
+	if (choice == 2 && !have_ash) {
+		UI_driver->fMessage("ASH is not installed on this stick", TRUE);
+		return FALSE;
+	}
+	snprintf(cmd, sizeof cmd, "boot %s", names[choice - 1]);
+	if (!ctl_request(cmd, reply, sizeof reply)) {
+		UI_driver->fMessage(reply[0] ? reply : "Not available", TRUE);
+		return FALSE;
+	}
+	KMS_HDEV_SetBootTarget(names[choice - 1]);
+	snprintf(line, sizeof line, "Restarting into %s...", boot_label(names[choice - 1]));
+	UI_driver->fMessage(line, FALSE);
+	return TRUE; /* init restarts us now */
+}
+
 /* ---- the menu --------------------------------------------------------- */
 
 void KMS_SYSMENU_Run(void)
@@ -606,8 +675,7 @@ void KMS_SYSMENU_Run(void)
 		if (!have_ctl)
 			Util_strlcpy(status, "", sizeof status);
 
-		snprintf(fuji_item, sizeof fuji_item, "FujiNet boot: %s",
-		         strcmp(status_get(status, "fujinet", buf, sizeof buf, "?"), "on") == 0 ? "on" : "off");
+		snprintf(fuji_item, sizeof fuji_item, "Boot into: %s", boot_label(boot_of(status, buf, sizeof buf)));
 		vol = ALSA_GetVolume();
 		if (vol >= 0)
 			snprintf(vol_item, sizeof vol_item, "Volume: %d%%", vol);
@@ -641,16 +709,10 @@ void KMS_SYSMENU_Run(void)
 
 		option = UI_driver->fSelect("System", 0, option, menu, NULL);
 		switch (option) {
-		case 1: {
-			int on = strcmp(status_get(status, "fujinet", buf, sizeof buf, "off"), "on") == 0;
-			if (ctl_request(on ? "fujinet off" : "fujinet on", reply, sizeof reply)) {
-				UI_driver->fMessage(on ? "Restarting without FujiNet..." : "Restarting into FujiNet...", FALSE);
-				done = TRUE; /* init restarts us now */
-			}
-			else
-				UI_driver->fMessage(reply[0] ? reply : "Not available", TRUE);
+		case 1:
+			if (boot_menu(boot_of(status, buf, sizeof buf)))
+				done = TRUE;
 			break;
-		}
 		case 2:
 			if (vol >= 0) {
 				int v = UI_driver->fSelectSlider("Volume", vol, 100, percent_label, NULL);

@@ -240,6 +240,31 @@ if [ -f "$BUILD/ssh/id_ed25519.pub" ]; then
 	log "Developer SSH key authorised (build/ssh/id_ed25519)"
 fi
 
+# ASH, the Atari shell (third_party/atari800-atari-shell, prebuilt): the
+# cartridge for boot=ash, the program and the boot disk; atari/hdd is its h:
+# device (the emulator's SIO device $72). README.TXT uses ATASCII line ends.
+ASH_REL=$WORK/third_party/atari800-atari-shell/release
+if [ -f "$ASH_REL/ASH.CAR" ]; then
+	mkdir -p "$STICK/atari/ash" "$STICK/atari/hdd"
+	cp "$ASH_REL/ASH.CAR" "$STICK/atari/ash/ASH.CAR"
+	cp "$ASH_REL/ASH-TN.XEX" "$STICK/atari/ash/ASH.XEX"
+	cp "$ASH_REL/ASH-TN.ATR" "$STICK/atari/ash/ASH.ATR"
+	printf '%s\n' \
+		"h: is this folder, atari/hdd on" \
+		"the stick: files for the Atari, 8.3" \
+		"names, no subfolders." \
+		"" \
+		"sd: is the stick and USB drives:" \
+		"  sd:/atari  the stick's atari folder" \
+		"  sd:/usb    one folder per USB drive" \
+		"Writing to sd: needs 'sd rw' first." \
+		"atari/ash and atari/config stay" \
+		"read-only." \
+		| tr '\n' '\233' > "$STICK/atari/hdd/README.TXT"
+else
+	log "ASH not found (git submodule update --init third_party/atari800-atari-shell)"
+fi
+
 cat > "$STICK/atari/README.txt" <<'EOF'
 atari-os-x86 - this stick boots an Atari 8-bit computer.
 
@@ -247,6 +272,8 @@ atari-os-x86 - this stick boots an Atari 8-bit computer.
   disks/   put .ATR/.XFD/.DCM disk images here
   carts/   put .CAR/.ROM cartridges here
   roms/    optional real Atari OS ROMs (ATARIXL.ROM, ATARIBAS.ROM ...)
+  ash/     ASH, the Atari shell (F8 > Boot into: ASH)
+  hdd/     ASH's h: drive
   config/  emulator configuration (saved automatically)
 
 Keys: F1 menu, F2 OPTION, F3 SELECT, F4 START, F5 reset (Shift+F5 cold),

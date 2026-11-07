@@ -75,6 +75,7 @@
 #define SYSCONF      MEDIA_USER "/config/system.conf"
 #define MEDIA_WAIT_S 15
 #define USB_DIR      MEDIA "/usb"           /* USB drives, one folder each */
+#define ASH_CART     MEDIA_USER "/ash/ASH.CAR" /* the Atari shell (boot=ash) */
 
 static int debug = 0;
 static int nomedia = 0;
@@ -99,9 +100,14 @@ static int wpa_mon_fd = -1;        /* attached to wpa_supplicant's events */
 static char wifi_err[48] = "";     /* last failure since the last connect */
 static int wifi_scanned = 1;       /* a scan finished since the last connect */
 
+/* What the Atari boots into: BASIC (the plain XL), the ASH shell
+   cartridge, or FujiNet's CONFIG through NetSIO (-netsio). */
+enum { BOOT_BASIC, BOOT_ASH, BOOT_FUJINET };
+static const char *const boot_names[] = { "basic", "ash", "fujinet" };
+
 /* Persisted settings (system.conf on the stick). */
 static struct {
-	int fujinet_boot; /* emulator boots through FujiNet (-netsio) */
+	int boot;         /* BOOT_* */
 	int ssh;          /* dropbear running */
 	char rootpw[160]; /* crypt(3) hash, empty = keys only */
 } conf = { 0, 0, "" };
@@ -258,7 +264,12 @@ static void load_sysconf(void)
 	if (read_file(SYSCONF, buf, sizeof buf) < 0)
 		return;
 	(void)0;
-	conf.fujinet_boot = strstr(buf, "fujinet=1") != NULL;
+	/* "boot=" replaced the boolean "fujinet=" (read as boot=fujinet). */
+	conf.boot = BOOT_BASIC;
+	if (strstr(buf, "boot=ash"))
+		conf.boot = BOOT_ASH;
+	else if (strstr(buf, "boot=fujinet") || strstr(buf, "fujinet=1"))
+		conf.boot = BOOT_FUJINET;
 	conf.ssh = strstr(buf, "ssh=1") != NULL;
 	{
 		char *p = strstr(buf, "rootpw=");
@@ -281,8 +292,18 @@ static void save_sysconf(void)
 	f = fopen(SYSCONF, "w");
 	if (!f)
 		return;
-	fprintf(f, "fujinet=%d\nssh=%d\nrootpw=%s\n", conf.fujinet_boot, conf.ssh, conf.rootpw);
+	fprintf(f, "boot=%s\nssh=%d\nrootpw=%s\n", boot_names[conf.boot], conf.ssh, conf.rootpw);
 	fclose(f);
+}
+
+/* The boot target in effect: FujiNet needs FujiNet-PC, ASH its cartridge. */
+static int boot_effective(void)
+{
+	if (conf.boot == BOOT_FUJINET && !fujinet_enabled)
+		return BOOT_BASIC;
+	if (conf.boot == BOOT_ASH && !exists(ASH_CART))
+		return BOOT_BASIC;
+	return conf.boot;
 }
 
 static void sleep_ms(int ms)
@@ -1436,8 +1457,12 @@ static void start_emulator(void)
 		argv[n++] = "-evdev-debug";
 		argv[n++] = "-kms-debug";
 	}
-	if (fujinet_enabled && conf.fujinet_boot)
+	if (fujinet_enabled && conf.boot == BOOT_FUJINET)
 		argv[n++] = "-netsio"; /* the emulator is the NetSIO hub FujiNet-PC connects to */
+	if (conf.boot == BOOT_ASH && exists(ASH_CART)) {
+		argv[n++] = "-cart"; /* atari800 reads the type from the CART header */
+		argv[n++] = ASH_CART;
+	}
 	/* Extra options, one per line, from the stick. */
 	{
 		char path[256];
@@ -1625,8 +1650,9 @@ static void cmd_status(int fd)
 	char buf[2048], line[300], val[128];
 	char *p;
 
-	snprintf(line, sizeof line, "fujinet %s\nssh %s\npassword %s\nefi %s\nmedia %s\n",
-	         fujinet_enabled && conf.fujinet_boot ? "on" : "off", ssh_pid > 0 ? "on" : "off",
+	snprintf(line, sizeof line, "boot %s\nfujinet %s\nssh %s\npassword %s\nefi %s\nmedia %s\n",
+	         boot_names[boot_effective()], boot_effective() == BOOT_FUJINET ? "on" : "off",
+	         ssh_pid > 0 ? "on" : "off",
 	         conf.rootpw[0] ? "set" : "none", efi_ok ? "yes" : "no", media_kind);
 	reply(fd, line);
 	snprintf(line, sizeof line, "usb %d\n", usb_count);
@@ -1812,12 +1838,27 @@ static void ctl_handle(int fd)
 
 	if (strcmp(line, "status") == 0)
 		cmd_status(fd);
-	else if (strcmp(line, "fujinet on") == 0 || strcmp(line, "fujinet off") == 0) {
-		if (!fujinet_enabled) {
+	else if (strncmp(line, "boot ", 5) == 0 || strcmp(line, "fujinet on") == 0 ||
+	         strcmp(line, "fujinet off") == 0) {
+		/* "fujinet on|off" are the old spellings of boot fujinet|basic */
+		int b;
+		const char *want = strncmp(line, "boot ", 5) == 0 ? line + 5 :
+		                   strcmp(line, "fujinet on") == 0 ? "fujinet" : "basic";
+		for (b = 0; b < 3 && strcmp(want, boot_names[b]) != 0; b++)
+			;
+		if (b == 3) {
+			reply(fd, "ERR usage: boot basic|ash|fujinet\n");
+			return;
+		}
+		if (b == BOOT_FUJINET && !fujinet_enabled) {
 			reply(fd, "ERR FujiNet not installed\n");
 			return;
 		}
-		conf.fujinet_boot = strcmp(line, "fujinet on") == 0;
+		if (b == BOOT_ASH && !exists(ASH_CART)) {
+			reply(fd, "ERR ASH not installed (atari/ash/ASH.CAR)\n");
+			return;
+		}
+		conf.boot = b;
 		save_sysconf();
 		reply(fd, "OK\n");
 		emu_restart_requested = 1;
@@ -2185,7 +2226,7 @@ int main(void)
 							emu_pid = -1;
 							if (emu_restart_requested) {
 								emu_restart_requested = 0;
-								logmsg("restarting emulator (fujinet boot %s)", conf.fujinet_boot ? "on" : "off");
+								logmsg("restarting emulator (boot %s)", boot_names[boot_effective()]);
 								start_emulator();
 								continue;
 							}

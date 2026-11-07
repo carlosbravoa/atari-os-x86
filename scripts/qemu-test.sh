@@ -4,6 +4,7 @@
 #   scripts/qemu-test.sh start [bios|uefi]   boot build/atari-os.img in the background
 #   scripts/qemu-test.sh serial "<cmd>"      run a shell command on the serial console (debug image)
 #   scripts/qemu-test.sh key <qemu-key>      press a key (QEMU sendkey names, e.g. ret, f1, a)
+#   scripts/qemu-test.sh type "<text>"       type text (US layout; \n = RETURN), e.g. "ls h:\n"
 #   scripts/qemu-test.sh shot <file.png>     screenshot
 #   scripts/qemu-test.sh log [n]             last n lines of the serial log
 #   scripts/qemu-test.sh mon "<cmd>"         QEMU monitor command (e.g. device_add for hotplug)
@@ -41,6 +42,31 @@ def talk(name, data, wait):
     s.close(); return out.decode(errors="replace")
 if what == "mon":
     print(talk("mon", sys.argv[3] + "\n", float(sys.argv[4])))
+elif what == "type":
+    # one sendkey per character, US layout, as the emulator maps PC keys
+    names = {" ": "spc", "\n": "ret", "-": "minus", "_": "shift-minus", "=": "equal",
+             "+": "shift-equal", ";": "semicolon", ":": "shift-semicolon",
+             "'": "apostrophe", '"': "shift-apostrophe", ",": "comma", "<": "shift-comma",
+             ".": "dot", ">": "shift-dot", "/": "slash", "?": "shift-slash",
+             "!": "shift-1", "@": "shift-2", "#": "shift-3", "$": "shift-4", "%": "shift-5",
+             "^": "shift-6", "&": "shift-7", "*": "shift-8", "(": "shift-9", ")": "shift-0",
+             "[": "bracket_left", "]": "bracket_right", "\\": "backslash", "|": "shift-backslash"}
+    text = sys.argv[3].replace("\\n", "\n")
+    s = socket.socket(socket.AF_UNIX); s.connect(f"{D}/mon.sock"); s.settimeout(0.05)
+    for ch in text:
+        if ch.isalpha() and ch.isascii():
+            key = ("shift-" + ch.lower()) if ch.isupper() else ch
+        elif ch.isdigit():
+            key = ch
+        elif ch in names:
+            key = names[ch]
+        else:
+            print(f"type: no key for {ch!r}", file=sys.stderr); continue
+        s.sendall(f"sendkey {key}\n".encode())
+        time.sleep(float(sys.argv[4]))
+        try: s.recv(65536)
+        except Exception: pass
+    s.close()
 elif what == "serial":
     out = talk("serial", "echo __BEGIN__; " + sys.argv[3] + "; echo __END__\n", float(sys.argv[4]))
     lines = out.replace("\r", "").split("\n")
@@ -79,9 +105,10 @@ start)
 	;;
 serial) py serial "$2" "${3:-2}" ;;
 key) py mon "sendkey $2" 0.5 >/dev/null ;;
+type) py type "$2" "${QEMU_TYPE_DELAY:-0.15}" ;;
 shot) py mon "screendump $2 -f png" 1.5 >/dev/null; ls -la "$2" ;;
 log) tail -n "${2:-40}" "$D/serial.log" ;;
 mon) py mon "$2" "${3:-1}" | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/\r//g' | grep -vF -e "$2" -e "(qemu)" || true ;;
 stop) [ -f "$D/qemu.pid" ] && kill "$(cat "$D/qemu.pid")" 2>/dev/null; rm -f "$D/qemu.pid"; echo stopped ;;
-*) echo "usage: $0 start|serial|key|shot|log|mon|stop" >&2; exit 1 ;;
+*) echo "usage: $0 start|serial|key|type|shot|log|mon|stop" >&2; exit 1 ;;
 esac

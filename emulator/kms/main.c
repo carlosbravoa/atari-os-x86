@@ -29,6 +29,7 @@
 #ifdef SOUND
 #include "sound.h"
 #endif
+#include "kms/kms_hdev.h"
 #include "kms/kms_input.h"
 #include "kms/kms_library.h"
 #include "kms/kms_sysmenu.h"
@@ -162,6 +163,7 @@ int main(int argc, char **argv)
 			INPUT_key_code = AKEY_NONE;
 		}
 		KMS_LIBRARY_Poll();
+		KMS_HDEV_Poll();
 		if (KMS_LIBRARY_requested) {
 			KMS_LIBRARY_requested = FALSE;
 #ifdef SOUND

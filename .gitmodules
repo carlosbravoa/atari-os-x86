@@ -4,3 +4,6 @@
 [submodule "third_party/fujinet-firmware"]
 	path = third_party/fujinet-firmware
 	url = https://github.com/FujiNetWIFI/fujinet-firmware.git
+[submodule "third_party/atari800-atari-shell"]
+	path = third_party/atari800-atari-shell
+	url = https://github.com/carlosbravoa/atari800-atari-shell
