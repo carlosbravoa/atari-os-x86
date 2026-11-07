@@ -1,0 +1,45 @@
+diff --git a/lib/bus/sio/sio.cpp b/lib/bus/sio/sio.cpp
+index 3a36eec35..de6ed13c2 100755
+--- a/lib/bus/sio/sio.cpp
++++ b/lib/bus/sio/sio.cpp
+@@ -365,6 +365,17 @@ void systemBus::_sio_process_queue()
+  * Throw out stray input on SIO if neither of the above two are true
+  * Give NETWORK devices an opportunity to signal available data
+  */
++#ifndef ESP_PLATFORM
++// atari-os-x86 (fujinet/patches/0003-pc-idle-backoff.patch): the idle
++// loop below waits 1 ms per pass and services the web server and task
++// manager every time, ~1000 wake-ups a second. After 200 ms without bus
++// traffic wait 5 ms instead; the first byte (poll() returns as soon as
++// the socket is readable) or command frame goes back to 1 ms.
++static unsigned long sio_last_activity_ms = 0;
++#define SIO_IDLE_AFTER_MS 200
++#define SIO_IDLE_POLL_MS 5
++#endif
++
+ void systemBus::service()
+ {
+     // Check for any messages in our queue (this should always happen, even if any other special
+@@ -448,6 +459,7 @@ void systemBus::service()
+     {
+ #ifndef ESP_PLATFORM
+         unsigned long startms = fnSystem.millis();
++        sio_last_activity_ms = startms;
+ #endif
+         _sio_process_cmd();
+ #ifndef ESP_PLATFORM
+@@ -473,7 +485,13 @@ void systemBus::service()
+         if (!SYSTEM_BUS.isBoIP())
+             _port->discardInput();
+         else
+-            _netsio.poll(1); // wait 1 ms for something to happen (reliefs CPU usage)
++        {
++            // wait 1 ms for something to happen (reliefs CPU usage), 5 ms when idle
++            unsigned long now = fnSystem.millis();
++            int wait_ms = now - sio_last_activity_ms > SIO_IDLE_AFTER_MS ? SIO_IDLE_POLL_MS : 1;
++            if (_netsio.poll(wait_ms))
++                sio_last_activity_ms = fnSystem.millis();
++        }
+ #endif
+     }
+ 

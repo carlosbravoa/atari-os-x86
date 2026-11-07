@@ -37,7 +37,9 @@ IMG_MB=${IMG_MB:-1024}
 
 # fbdev_emulation=0: no fbcon on the panel, ever. The emulator owns the
 # display; a late fbcon takeover otherwise commits over its scanout.
-CMDLINE="quiet loglevel=3 drm_kms_helper.fbdev_emulation=0 vt.global_cursor_default=0 ${EXTRA_CMDLINE:-}"
+# Power: Intel panel self refresh and framebuffer compression (default on
+# in recent kernels; explicit here), no NMI watchdog (a timer per CPU).
+CMDLINE="quiet loglevel=3 drm_kms_helper.fbdev_emulation=0 vt.global_cursor_default=0 i915.enable_psr=1 i915.enable_fbc=1 nmi_watchdog=0 ${EXTRA_CMDLINE:-}"
 
 # Firmware: GPUs, Intel Wi-Fi (linux-firmware-intel carries iwlwifi), the
 # SOF audio DSP on 2019+ Intel laptops, and the wireless regulatory db.
@@ -301,6 +303,20 @@ if [ -f "$ASH_REL/ASH.CAR" ]; then
 else
 	log "ASH not found (git submodule update --init third_party/atari800-atari-shell)"
 fi
+
+# FujiNet's SD card (fujinet-pc -s atari/fujinet/SD; CONFIG's host "SD"),
+# with a note in ATASCII (EOL 155) so it reads right on the Atari too.
+mkdir -p "$STICK/atari/fujinet/SD"
+printf '%s\n' \
+	"This is FujiNet's SD card." \
+	"" \
+	"Put ATR/XEX files here from the" \
+	"Library (F9, a file, Copy to FujiNet" \
+	"SD) or over SSH/USB: it is the" \
+	"atari/fujinet/SD folder on the stick." \
+	"" \
+	"CONFIG lists it as host SD." \
+	| tr '\n' '\233' > "$STICK/atari/fujinet/SD/README.TXT"
 
 cat > "$STICK/atari/README.txt" <<'EOF'
 atari-os-x86 - this stick boots an Atari 8-bit computer.

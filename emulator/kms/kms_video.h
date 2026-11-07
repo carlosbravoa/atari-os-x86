@@ -45,4 +45,16 @@ extern int KMS_VIDEO_width;
 extern int KMS_VIDEO_height;
 extern double KMS_VIDEO_refresh;
 
+/* Pacing (see video.c): lock when |refresh - Atari fps| < KMS_VIDEO_lock_hz. */
+extern double KMS_VIDEO_lock_hz;
+/* -kms-mode / KMS_MODE ("WxH" or "WxH@Hz"; "" = automatic). */
+extern char KMS_VIDEO_mode_request[32];
+/* The Atari's frame rate for the current TV system (49.86 or 59.92). */
+double KMS_VIDEO_AtariFps(void);
+/* TRUE when the page flips pace the emulation (outside turbo and menus). */
+int KMS_VIDEO_PacingLocked(void);
+/* TRUE when a mode at the current resolution would lock FPS (the mode is
+   only chosen when the emulator starts). */
+int KMS_VIDEO_HasModeFor(double fps);
+
 #endif /* KMS_KMS_KMS_VIDEO_H_ */

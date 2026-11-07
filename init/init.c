@@ -20,6 +20,8 @@
  *   atari.nofujinet=1  do not start FujiNet-PC or networking
  *   atari.hwsim=1      load mac80211_hwsim (two virtual Wi-Fi radios) before
  *                      networking, to exercise the Wi-Fi code in QEMU
+ *   atari.perf=1       log CPU use, package power, temperature and clock
+ *                      every 10 s to atari/logs/perf.log (socket: perf on)
  *
  * Licence: GPL-2.0-or-later, like the emulator it serves.
  */
@@ -29,6 +31,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -76,6 +79,7 @@
 #define MEDIA_WAIT_S 15
 #define USB_DIR      MEDIA "/usb"           /* USB drives, one folder each */
 #define ASH_CART     MEDIA_USER "/ash/ASH.CAR" /* the Atari shell (boot=ash) */
+#define PERF_LOG     MEDIA_USER "/logs/perf.log"
 
 static int debug = 0;
 static int nomedia = 0;
@@ -83,6 +87,7 @@ static int noemu = 0;
 static int emudelay = 0;
 static int nofujinet = 0;
 static int hwsim = 0;
+static int perf_logging = 0;       /* atari.perf=1 or "perf on" */
 static int media_mounted = 0;
 static pid_t emu_pid = -1;
 static pid_t shell_pid = -1;
@@ -190,6 +195,36 @@ static void write_file(const char *path, const char *val)
 		return;
 	if (write(fd, val, strlen(val)) < 0) { /* ignore */ }
 	close(fd);
+}
+
+/* write_file() that says whether the kernel took the value. */
+static int write_sysfs(const char *path, const char *val)
+{
+	int fd = open(path, O_WRONLY | O_CLOEXEC);
+	ssize_t n;
+	if (fd < 0)
+		return 0;
+	n = write(fd, val, strlen(val));
+	close(fd);
+	return n == (ssize_t)strlen(val);
+}
+
+static double mono_now(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* Milliseconds from now until T (monotonic), for poll(); never negative. */
+static int ms_until(double t)
+{
+	double d = (t - mono_now()) * 1000.0;
+	if (d <= 0)
+		return 0;
+	if (d > 600000)
+		return 600000;
+	return (int)d + 1;
 }
 
 /* Run a program to completion; returns its exit status or -1. */
@@ -1117,6 +1152,92 @@ static void usb_unmount_all(void)
 	umount2(USB_DIR, MNT_DETACH);
 }
 
+/* ---- laptop power defaults ------------------------------------------------ */
+
+/* Write VAL to every file matching PATTERN unless skip(path) says not
+   to; returns how many took it. */
+static int write_glob(const char *pattern, const char *val, int (*skip)(const char *), int *skipped)
+{
+	glob_t g;
+	size_t i;
+	int n = 0;
+	if (glob(pattern, 0, NULL, &g) != 0)
+		return 0;
+	for (i = 0; i < g.gl_pathc; i++) {
+		if (skip && skip(g.gl_pathv[i])) {
+			if (skipped)
+				(*skipped)++;
+			continue;
+		}
+		n += write_sysfs(g.gl_pathv[i], val);
+	}
+	globfree(&g);
+	return n;
+}
+
+/* USB autosuspend stays off for the boot stick and the hubs it hangs from
+   (realpath of /sys/block/<disk>/device below the USB device), and for HID
+   devices (interface class 03): keyboards drop keys on resume. */
+static int usb_keep_on(const char *control)
+{
+	char dev[256], real[PATH_MAX], stick[PATH_MAX], link[96], pattern[600];
+	const char *name;
+	char *slash;
+	glob_t g;
+	size_t i, len;
+	int hid = 0;
+
+	snprintf(dev, sizeof dev, "%s", control);
+	if (!(slash = strstr(dev, "/power/control")))
+		return 1;
+	*slash = '\0';
+	name = strrchr(dev, '/') ? strrchr(dev, '/') + 1 : dev;
+	if (strchr(name, ':') || !realpath(dev, real))
+		return 1; /* interfaces have no autosuspend of their own */
+	len = strlen(real);
+	for (i = 0; i < 2; i++) {
+		if (!boot_disks[i][0])
+			continue;
+		snprintf(link, sizeof link, "/sys/block/%s/device", boot_disks[i]);
+		if (realpath(link, stick) && strncmp(stick, real, len) == 0 && stick[len] == '/')
+			return 1;
+	}
+	snprintf(pattern, sizeof pattern, "%s/%s:*/bInterfaceClass", dev, name);
+	if (glob(pattern, 0, NULL, &g) == 0) {
+		for (i = 0; i < g.gl_pathc && !hid; i++) {
+			char cls[8];
+			hid = read_file(g.gl_pathv[i], cls, sizeof cls) > 0 && strcmp(cls, "03") == 0;
+		}
+		globfree(&g);
+	}
+	return hid;
+}
+
+/* /sys/class/drm/card0/device/..., not the connectors (card0-eDP-1). */
+static int drm_not_card(const char *path)
+{
+	const char *p = path + strlen("/sys/class/drm/");
+	return strncmp(p, "card", 4) != 0 || strchr(p, '/') == NULL
+	       || memchr(p, '-', (size_t)(strchr(p, '/') - p)) != NULL;
+}
+
+/* Cheap, reversible laptop power settings, applied once after the full
+   driver set is loaded. Every file is optional (QEMU has almost none). */
+static void power_defaults(void)
+{
+	int aspm, sata, usb, usb_kept = 0, epp, gpu;
+
+	aspm = write_sysfs("/sys/module/pcie_aspm/parameters/policy", "powersave");
+	sata = write_glob("/sys/class/scsi_host/host*/link_power_management_policy", "med_power_with_dipm", NULL, NULL);
+	usb = write_glob("/sys/bus/usb/devices/*/power/control", "auto", usb_keep_on, &usb_kept);
+	epp = write_glob("/sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference", "balance_power",
+	                 NULL, NULL);
+	gpu = write_glob("/sys/class/drm/card*/device/power/control", "auto", drm_not_card, NULL);
+	logmsg("power: pcie aspm %s, sata lpm %d host(s), usb autosuspend %d device(s) (%d kept on: stick, hid),"
+	       " epp balance_power %d policies, gpu runtime pm %d",
+	       aspm ? "powersave" : "unchanged", sata, usb, usb_kept, epp, gpu);
+}
+
 /* ---- networking ---------------------------------------------------------- */
 
 /* ---- wpa_supplicant events ----------------------------------------------- */
@@ -1452,11 +1573,13 @@ static void start_emulator(void)
 	argv[n++] = "-config";
 	argv[n++] = (char *)(media_mounted ? MEDIA_USER "/config/atari800.cfg" : "/run/atari/atari800.cfg");
 	/* First boot: seed the config so the machine behaves like a real XL,
-	   which powers up into BASIC. atari800 fills in the rest on save. */
+	   which powers up into BASIC, and an NTSC one (60 Hz: smooth on
+	   laptop panels; F8 "TV system" switches). atari800 fills in the rest
+	   on save. An existing config is the user's and is left alone. */
 	if (!exists(argv[n - 1])) {
 		FILE *f = fopen(argv[n - 1], "w");
 		if (f) {
-			fputs("Atari 800 Emulator, Version 7.x\nDISABLE_BASIC=0\n", f);
+			fputs("Atari 800 Emulator, Version 7.x\nDISABLE_BASIC=0\nDEFAULT_TV_MODE=NTSC\n", f);
 			fclose(f);
 		}
 	}
@@ -1616,6 +1739,208 @@ static int efi_bootnext(void)
 
 /* ---- control socket ------------------------------------------------------- */
 
+/* ---- performance sampling ------------------------------------------------- */
+
+/* CPU use of our processes (% of one core, from /proc/<pid>/stat deltas),
+   package power (RAPL energy counter), CPU temperature (coretemp/k10temp)
+   and cpu0's clock. Two independent samplers: the perf log (every 10 s)
+   and the "status" reply (at most once a second, when asked). */
+#define PERF_NAMES 5
+#define PERF_PIDS  64
+static const char *const perf_names[PERF_NAMES] = { "atari800", "fujinet", "wpa_supplicant", "dropbear", "init" };
+
+struct perf_state {
+	int have;                       /* a previous sample exists */
+	double t;                       /* its time (CLOCK_MONOTONIC) */
+	int npid;
+	int pid[PERF_PIDS];
+	unsigned long ticks[PERF_PIDS]; /* utime + stime */
+	double energy_uj;               /* < 0: no RAPL */
+	/* results of the last sample */
+	double cpu[PERF_NAMES];
+	double watts;                   /* < 0: n/a */
+	double temp;                    /* < -100: n/a */
+	int mhz;                        /* 0: n/a */
+};
+static struct perf_state perf_log_st, perf_status_st;
+static double perf_next = 0;        /* next perf log line */
+
+static double perf_read_double(const char *path, double def)
+{
+	char buf[64];
+	if (read_file(path, buf, sizeof buf) <= 0)
+		return def;
+	return strtod(buf, NULL);
+}
+
+static double perf_temp(void)
+{
+	static char path[300] = "";
+	static int searched = 0;
+	if (!searched) {
+		glob_t g;
+		size_t i;
+		searched = 1;
+		if (glob("/sys/class/hwmon/hwmon*/name", 0, NULL, &g) == 0) {
+			for (i = 0; i < g.gl_pathc && !path[0]; i++) {
+				char name[32];
+				if (read_file(g.gl_pathv[i], name, sizeof name) > 0
+				    && (strcmp(name, "coretemp") == 0 || strcmp(name, "k10temp") == 0)) {
+					snprintf(path, sizeof path, "%.*s/temp1_input",
+					         (int)(strrchr(g.gl_pathv[i], '/') - g.gl_pathv[i]), g.gl_pathv[i]);
+				}
+			}
+			globfree(&g);
+		}
+	}
+	if (!path[0])
+		return -1000;
+	return perf_read_double(path, -1000000) / 1000.0;
+}
+
+static void perf_sample(struct perf_state *st)
+{
+	double now = mono_now(), dt = st->have ? now - st->t : 0, uptime;
+	long hz = sysconf(_SC_CLK_TCK);
+	int npid = 0, i, k;
+	int pid[PERF_PIDS];
+	unsigned long ticks[PERF_PIDS];
+	DIR *d;
+	struct dirent *e;
+	double energy;
+
+	if (hz <= 0)
+		hz = 100;
+	uptime = perf_read_double("/proc/uptime", 0);
+	for (k = 0; k < PERF_NAMES; k++)
+		st->cpu[k] = 0;
+	d = opendir("/proc");
+	while (d && (e = readdir(d)) != NULL) {
+		char path[300], buf[512], *open_p, *close_p;
+		unsigned long ut, stime, start;
+		if (!isdigit((unsigned char)e->d_name[0]))
+			continue;
+		snprintf(path, sizeof path, "/proc/%s/stat", e->d_name);
+		if (read_file(path, buf, sizeof buf) <= 0)
+			continue;
+		open_p = strchr(buf, '(');
+		close_p = strrchr(buf, ')');
+		if (!open_p || !close_p || close_p < open_p)
+			continue;
+		*close_p = '\0';
+		for (k = 0; k < PERF_NAMES && strcmp(open_p + 1, perf_names[k]) != 0; k++)
+			;
+		if (k == PERF_NAMES)
+			continue;
+		/* after "(comm)": state ppid pgrp session tty tpgid flags minflt
+		   cminflt majflt cmajflt utime stime cutime cstime priority nice
+		   threads itrealvalue starttime */
+		if (sscanf(close_p + 1, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu %*d %*d %*d %*d %*d %*d %lu",
+		           &ut, &stime, &start) != 3)
+			continue;
+		if (npid < PERF_PIDS) {
+			pid[npid] = atoi(e->d_name);
+			ticks[npid] = ut + stime;
+			if (st->have) {
+				unsigned long prev = 0;
+				for (i = 0; i < st->npid; i++)
+					if (st->pid[i] == pid[npid])
+						prev = st->ticks[i];
+				/* a process that is new since the last sample counts in full */
+				if (dt > 0 && ticks[npid] >= prev)
+					st->cpu[k] += (double)(ticks[npid] - prev) / ((double)hz * dt) * 100.0;
+			}
+			else if (uptime * hz > (double)start + hz)
+				/* first sample: the average since the process started */
+				st->cpu[k] += (double)ticks[npid] / (uptime * hz - (double)start) * 100.0;
+			npid++;
+		}
+	}
+	if (d)
+		closedir(d);
+
+	energy = perf_read_double("/sys/class/powercap/intel-rapl:0/energy_uj", -1);
+	st->watts = -1;
+	if (energy >= 0 && st->have && st->energy_uj >= 0 && dt > 0) {
+		double delta = energy - st->energy_uj;
+		if (delta < 0) /* the counter wrapped */
+			delta += perf_read_double("/sys/class/powercap/intel-rapl:0/max_energy_range_uj", 0);
+		if (delta >= 0)
+			st->watts = delta / 1e6 / dt;
+	}
+	st->temp = perf_temp();
+	st->mhz = (int)(perf_read_double("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", 0) / 1000.0);
+
+	st->have = 1;
+	st->t = now;
+	st->npid = npid;
+	memcpy(st->pid, pid, sizeof pid[0] * (size_t)npid);
+	memcpy(st->ticks, ticks, sizeof ticks[0] * (size_t)npid);
+	st->energy_uj = energy;
+}
+
+static void perf_fmt_w(char *out, size_t size, const struct perf_state *st)
+{
+	if (st->watts >= 0)
+		snprintf(out, size, "%.1f", st->watts);
+	else
+		snprintf(out, size, "n/a");
+}
+
+static void perf_fmt_t(char *out, size_t size, const struct perf_state *st)
+{
+	if (st->temp > -100)
+		snprintf(out, size, "%.0f", st->temp);
+	else
+		snprintf(out, size, "n/a");
+}
+
+/* One perf log line, every 10 s while perf logging is on. */
+static void perf_tick(void)
+{
+	char line[400], w[16], t[16], mhz[16];
+	size_t n = 0;
+	int k, fd;
+	const char *path = media_mounted ? PERF_LOG : "/run/perf.log";
+
+	if (!perf_logging || mono_now() < perf_next)
+		return;
+	perf_next = mono_now() + 10.0;
+	perf_sample(&perf_log_st);
+	n += (size_t)snprintf(line + n, sizeof line - n, "%.0f s:", perf_read_double("/proc/uptime", 0));
+	for (k = 0; k < PERF_NAMES; k++)
+		n += (size_t)snprintf(line + n, sizeof line - n, " %s %.1f%%", perf_names[k], perf_log_st.cpu[k]);
+	perf_fmt_w(w, sizeof w, &perf_log_st);
+	perf_fmt_t(t, sizeof t, &perf_log_st);
+	if (perf_log_st.mhz > 0)
+		snprintf(mhz, sizeof mhz, "%d", perf_log_st.mhz);
+	else
+		snprintf(mhz, sizeof mhz, "n/a");
+	snprintf(line + n, sizeof line - n, ", package %s W, cpu %s C, cpu0 %s MHz\n", w, t, mhz);
+	if (media_mounted)
+		mkdir_p(MEDIA_USER "/logs", 0755);
+	fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+	if (fd >= 0) {
+		if (write(fd, line, strlen(line)) < 0) { /* ignore */ }
+		close(fd);
+	}
+	if (debug) {
+		line[strcspn(line, "\n")] = '\0';
+		logmsg("perf: %s", line);
+	}
+}
+
+static void perf_start(void)
+{
+	if (perf_logging)
+		return;
+	perf_logging = 1;
+	perf_log_st.have = 0;
+	perf_sample(&perf_log_st); /* baseline: the first line covers 10 s */
+	perf_next = mono_now() + 10.0;
+	logmsg("perf: logging every 10 s to %s", media_mounted ? PERF_LOG : "/run/perf.log");
+}
+
 static void shutdown_machine(int how);
 
 static void ctl_open(void)
@@ -1666,6 +1991,16 @@ static void cmd_status(int fd)
 	reply(fd, line);
 	snprintf(line, sizeof line, "version %s\n", os_version);
 	reply(fd, line);
+	{
+		/* perf <emu%> <fuji%> <tempC> <watts>; sampled at most once a second */
+		char w[16], t[16];
+		if (!perf_status_st.have || mono_now() - perf_status_st.t >= 1.0)
+			perf_sample(&perf_status_st);
+		perf_fmt_w(w, sizeof w, &perf_status_st);
+		perf_fmt_t(t, sizeof t, &perf_status_st);
+		snprintf(line, sizeof line, "perf %.0f %.0f %s %s\n", perf_status_st.cpu[0], perf_status_st.cpu[1], t, w);
+		reply(fd, line);
+	}
 
 	/* first non-loopback IPv4 address */
 	{
@@ -1928,6 +2263,16 @@ static void ctl_handle(int fd)
 		}
 		reply(fd, "OK\n");
 	}
+	else if (strcmp(line, "perf") == 0 || strcmp(line, "perf on") == 0) {
+		perf_start();
+		reply(fd, "OK\n");
+	}
+	else if (strcmp(line, "perf off") == 0) {
+		if (perf_logging)
+			logmsg("perf: logging stopped");
+		perf_logging = 0;
+		reply(fd, "OK\n");
+	}
 	else if (strcmp(line, "bootnext") == 0)
 		reply(fd, efi_bootnext() == 0 ? "OK\n" : "ERR not booted from UEFI\n");
 	else if (strcmp(line, "logs") == 0) {
@@ -2072,6 +2417,8 @@ static void parse_cmdline(void)
 		nofujinet = 1;
 	if (strstr(buf, "atari.hwsim=1"))
 		hwsim = 1;
+	if (strstr(buf, "atari.perf=1"))
+		perf_logging = -1; /* started with the main loop */
 	{
 		const char *p = strstr(buf, "atari.emudelay=");
 		if (p)
@@ -2135,6 +2482,7 @@ int main(void)
 	uevent_open();
 	coldplug();
 	usb_setup(); /* drives plugged in at boot; later ones arrive as uevents */
+	power_defaults();
 	/* The native GPU driver may have replaced the firmware framebuffer. */
 	splash_open();
 	splash_line("Hardware ready");
@@ -2167,10 +2515,17 @@ int main(void)
 	splash_close(); /* the emulator takes the display from here */
 	if (!noemu)
 		start_emulator();
+	if (perf_logging) {
+		perf_logging = 0;
+		perf_start();
+	}
 
 	for (;;) {
 		static int logs_saved = 0;
+		static double logs_due = 0;
 		int i, n = 0, r, ctl_slot = -1, uevent_slot = -1, mon_slot = -1, timeout;
+		if (logs_due == 0)
+			logs_due = mono_now() + 30.0;
 		pfds[n].fd = sfd;
 		pfds[n].events = POLLIN;
 		n++;
@@ -2198,8 +2553,11 @@ int main(void)
 			n++;
 		}
 		/* Batch modprobes a moment after the last uevent burst. */
-		timeout = uevent_pending ? 300 : (logs_saved ? -1 : 30000);
+		timeout = uevent_pending ? 300 : (logs_saved ? -1 : ms_until(logs_due));
+		if (perf_logging && (timeout < 0 || ms_until(perf_next) < timeout))
+			timeout = ms_until(perf_next);
 		r = poll(pfds, n, timeout);
+		perf_tick();
 		if (r == 0) {
 			if (uevent_pending) {
 				uevent_pending = 0;
@@ -2210,7 +2568,7 @@ int main(void)
 				}
 				continue;
 			}
-			if (!logs_saved) {
+			if (!logs_saved && mono_now() >= logs_due) {
 				save_logs(); /* 30 s after start: enough to see how the hardware came up */
 				logs_saved = 1;
 			}

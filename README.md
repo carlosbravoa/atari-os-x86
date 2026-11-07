@@ -106,8 +106,21 @@ style as the emulator's own, backed by PID 1 over a Unix socket:
 - **Wi-Fi**: scan, pick a network, type the password; `wpa_supplicant`
   keeps the network in `atari/config/wpa_supplicant.conf`
 - **Remote access (SSH)** on/off, **SSH password** (keys only until set)
-- **Hardware status** page: machine, CPU, RAM, video driver and mode,
-  sound card, Wi-Fi, IP, battery, boot medium, boot target, kernel
+- **TV system**: NTSC (60 Hz, the default: the Atari was an NTSC machine
+  first) or PAL (50 Hz, one keypress away here), switched live and saved
+  in the emulator config (`DEFAULT_TV_MODE`; a config that already says
+  PAL stays PAL). When the panel's refresh is within
+  0.75 Hz of the Atari's rate, the display paces the emulator (every Atari
+  frame shown once: smooth scrolling); otherwise atari800's timer does.
+  On a 60 Hz laptop panel, NTSC is the one that locks. The display mode is chosen at
+  start-up (the mode closest to the Atari's rate at the panel's
+  resolution; `KMS_MODE=WxH@Hz` in `atari800.cfg` or `-kms-mode` forces
+  one), so a panel with a 50 Hz mode picks it up for PAL after "Restart
+  emulator".
+- **Hardware status** page: machine, CPU, RAM, CPU use (emulator,
+  FujiNet), temperature and package power, video driver and mode, TV
+  system and pacing, sound card, Wi-Fi, IP, battery, boot medium, boot
+  target, kernel
 - **Reboot straight back into Atari** (UEFI `BootNext`, a one-shot request
   for the next start only; the machine's boot order is never touched)
 - Save logs to the stick, restart emulator, reboot, **shut down** (besides
@@ -173,6 +186,22 @@ up from the System menu. FujiNet's web UI is reachable on the LAN at
 FujiNet uses the laptop's network: it is online whenever the laptop has an
 address, over Wi-Fi or Ethernet. CONFIG's Wi-Fi screens scan for and join
 networks with the laptop's Wi-Fi, the same as the F8 System menu does.
+
+**The SD card** is the folder `atari/fujinet/SD/` on the stick; CONFIG
+lists it as the host `SD` (it starts with a `README.TXT`). Files get onto
+it in several ways:
+
+- the Library (F9): pick a file on the stick or a USB drive, **Copy to**
+  FujiNet SD (the tab is titled "FujiNet SD (host SD in CONFIG)");
+- copy them into `atari/fujinet/SD/` with the stick in another computer,
+  or over SSH (there is no scp/sftp on the appliance; stream it:
+  `ssh root@<ip> 'cat > /media/atari/fujinet/SD/GAME.ATR' < GAME.ATR`);
+- CONFIG's own copy between hosts (a TNFS host to SD). TNFS hosts are
+  read-only: copies go from them, never to them.
+
+Disks mounted on D1:-D8: in CONFIG are FujiNet's own slots (kept in
+`atari/fujinet/fnconfig.ini`), separate from the Library's "Mount as D1:",
+which mounts in the emulator.
 
 FujiNet-PC is built from source for musl with small patches
 (`fujinet/patches/`: musl fixes, the network bridge above) and with
@@ -274,7 +303,10 @@ QEMU_EXTRA="-drive if=none,id=usb2,format=raw,file=build/usb-test.img \
   -device usb-storage,bus=xhci.0,drive=usb2,removable=on" scripts/qemu-test.sh start
 ```
 
-Kernel command-line knobs for debugging: `atari.debug=1` (serial shell,
+Kernel command-line knobs for debugging: `atari.perf=1` (every 10 s, CPU
+use of atari800, fujinet, wpa_supplicant, dropbear and init, package power
+from RAPL, CPU temperature and clock to `atari/logs/perf.log`; the socket
+command `perf on|off` does the same at run time), `atari.debug=1` (serial shell,
 `-evdev-debug -kms-debug` on the emulator, emulator exit restarts instead of
 powering off), `atari.noemu=1`, `atari.emudelay=N`, `atari.nomedia=1`,
 `atari.hwsim=1` (two virtual Wi-Fi radios via `mac80211_hwsim`, so the

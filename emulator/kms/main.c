@@ -46,6 +46,10 @@ static void on_signal(int sig)
 
 void PLATFORM_ConfigInit(void)
 {
+	/* NTSC unless the config says otherwise (DEFAULT_TV_MODE=PAL is kept):
+	   the Atari was an NTSC machine first, and 59.92 Hz locks to the 60 Hz
+	   panels of most laptops (kms/video.c pacing). */
+	Atari800_tv_mode = Atari800_TV_NTSC;
 #ifdef SOUND
 	/* 20 ms of latency is plenty for direct ALSA; no sound server in the way. */
 	Sound_desired.buffer_ms = 20;

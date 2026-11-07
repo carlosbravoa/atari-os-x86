@@ -33,6 +33,7 @@
 
 #include "atari.h"
 #include "akey.h"
+#include "cfg.h"
 #include "input.h"
 #include "log.h"
 #include "platform.h"
@@ -330,7 +331,25 @@ static void hardware_page(const char *status)
 			add_line(page, &n, sizeof page, "RAM: %ld MB", kb / 1024);
 		fclose(f);
 	}
-	add_line(page, &n, sizeof page, "Video: %s %dx%d @ %.0f Hz", KMS_VIDEO_driver, KMS_VIDEO_width, KMS_VIDEO_height, KMS_VIDEO_refresh);
+	{
+		/* "CPU: 12% emu, 3% fujinet, 48 C, 2.1 W" from init's sampler
+		   ("perf <emu%> <fuji%> <tempC> <watts>", n/a when unknown) */
+		char emu[16], fuji[16], temp[16], watts[16];
+		status_get(status, "perf", v, sizeof v, "");
+		if (v[0] && sscanf(v, "%15s %15s %15s %15s", emu, fuji, temp, watts) == 4) {
+			size_t len;
+			snprintf(line, sizeof line, "CPU: %s%% emu, %s%% fujinet", emu, fuji);
+			len = strlen(line);
+			if (strcmp(temp, "n/a") != 0)
+				len += (size_t)snprintf(line + len, sizeof line - len, ", %s C", temp);
+			if (strcmp(watts, "n/a") != 0)
+				snprintf(line + len, sizeof line - len, ", %s W", watts);
+			add_line(page, &n, sizeof page, "%s", line);
+		}
+	}
+	add_line(page, &n, sizeof page, "Display: %s %dx%d @ %.4g Hz", KMS_VIDEO_driver, KMS_VIDEO_width, KMS_VIDEO_height, KMS_VIDEO_refresh);
+	add_line(page, &n, sizeof page, "Atari %s %.1f Hz, pacing: %s", Atari800_tv_mode == Atari800_TV_PAL ? "PAL" : "NTSC",
+	         KMS_VIDEO_AtariFps(), KMS_VIDEO_PacingLocked() && !Atari800_turbo ? "display" : "timer");
 	if (read_line("/proc/asound/cards", v, sizeof v)) {
 		char *p = strchr(v, ':');
 		add_line(page, &n, sizeof page, "Sound: %.32s", p ? p + 2 : v);
@@ -638,12 +657,42 @@ static int boot_menu(const char *current)
 	return TRUE; /* init restarts us now */
 }
 
+/* "TV system": PAL or NTSC, switched live (no cold start) and saved as
+   atari800's DEFAULT_TV_MODE. The display mode follows on the next start
+   when the panel has one closer to the new rate. */
+static void tv_menu(void)
+{
+	UI_tMenuItem menu[] = {
+		UI_MENU_ACTION(Atari800_TV_PAL, "PAL (50 Hz)"),
+		UI_MENU_ACTION(Atari800_TV_NTSC, "NTSC (60 Hz, default)"),
+		UI_MENU_END
+	};
+	char line[64];
+	const char *name;
+	int choice = UI_driver->fSelect("TV system", UI_SELECT_POPUP, Atari800_tv_mode, menu, NULL);
+	if (choice != Atari800_TV_PAL && choice != Atari800_TV_NTSC)
+		return;
+	if (choice != Atari800_tv_mode) {
+		Atari800_SetTVMode(choice);
+		CFG_WriteConfig();
+	}
+	name = choice == Atari800_TV_PAL ? "PAL: 50 Hz" : "NTSC: 60 Hz";
+	if (KMS_VIDEO_PacingLocked())
+		snprintf(line, sizeof line, "%s, smooth on this screen", name);
+	else if (KMS_VIDEO_HasModeFor(KMS_VIDEO_AtariFps()))
+		snprintf(line, sizeof line, "%s, smooth after a restart", name);
+	else
+		snprintf(line, sizeof line, "%s, judder on a %.0f Hz screen", name, KMS_VIDEO_refresh);
+	Log_print("sysmenu: TV system: %s", line);
+	UI_driver->fMessage(line, TRUE);
+}
+
 /* ---- the menu --------------------------------------------------------- */
 
 void KMS_SYSMENU_Run(void)
 {
 	static char fuji_item[48], vol_item[32], bri_item[32], wifi_item[80], ssh_item[48], pw_item[40], info_item[80];
-	static char boot_item[48];
+	static char boot_item[48], tv_item[40];
 	int option = 1;
 	int done = FALSE;
 
@@ -657,6 +706,7 @@ void KMS_SYSMENU_Run(void)
 			UI_MENU_ACTION(1, fuji_item),
 			UI_MENU_ACTION(2, vol_item),
 			UI_MENU_ACTION(3, bri_item),
+			UI_MENU_ACTION(14, tv_item),
 			UI_MENU_SUBMENU(4, wifi_item),
 			UI_MENU_ACTION(5, ssh_item),
 			UI_MENU_ACTION(11, pw_item),
@@ -688,6 +738,7 @@ void KMS_SYSMENU_Run(void)
 			snprintf(bri_item, sizeof bri_item, "Brightness: %d%%", bri);
 		else
 			snprintf(bri_item, sizeof bri_item, "Brightness: not controllable");
+		snprintf(tv_item, sizeof tv_item, "TV system: %s", Atari800_tv_mode == Atari800_TV_PAL ? "PAL" : "NTSC");
 		snprintf(wifi_item, sizeof wifi_item, "Wi-Fi: %s", status_get(status, "wifi", buf, sizeof buf, "no adapter"));
 		snprintf(ssh_item, sizeof ssh_item, "Remote access (SSH): %s",
 		         strcmp(status_get(status, "ssh", buf, sizeof buf, "?"), "on") == 0 ? "on" : "off");
@@ -735,6 +786,9 @@ void KMS_SYSMENU_Run(void)
 			break;
 		case 4:
 			wifi_menu();
+			break;
+		case 14:
+			tv_menu();
 			break;
 		case 5: {
 			int on = strcmp(status_get(status, "ssh", buf, sizeof buf, "off"), "on") == 0;

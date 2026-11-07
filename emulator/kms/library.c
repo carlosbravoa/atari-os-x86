@@ -1144,6 +1144,9 @@ static void make_title(char *out, size_t size, const lib_source *src, const char
 		Util_strlcpy(tail, path, sizeof tail);
 	if (filter[0])
 		snprintf(out, size, "%.12s: %s (filter: %.8s)", src->name, tail, filter);
+	else if (src->kind == SRC_SD && !rel[0])
+		/* CONFIG calls this folder the host "SD" */
+		snprintf(out, size, "FujiNet SD (host SD in CONFIG)");
 	else
 		snprintf(out, size, "%s: %s", src->name, tail);
 }
