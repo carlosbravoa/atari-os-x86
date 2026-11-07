@@ -1197,34 +1197,15 @@ static void efi_setup(void)
 	efi_ok = efi_read("BootCurrent", cur, sizeof cur) >= 2;
 }
 
-/* Boot this same entry once more on the next start (no boot menu key). */
+/* Boot this same entry once more on the next start (no boot menu key).
+   Only BootNext is ever written: the user's BootOrder is not ours to
+   change. */
 static int efi_bootnext(void)
 {
 	uint8_t cur[8];
 	if (!efi_ok || efi_read("BootCurrent", cur, sizeof cur) < 2)
 		return -1;
 	return efi_write("BootNext", cur + 4, 2);
-}
-
-/* Move the current entry to the front of BootOrder. */
-static int efi_bootdefault(void)
-{
-	uint8_t cur[8], order[4 + 256], neworder[256];
-	int n, i, k = 0;
-	if (!efi_ok || efi_read("BootCurrent", cur, sizeof cur) < 2)
-		return -1;
-	n = efi_read("BootOrder", order, sizeof order);
-	if (n < 2)
-		return -1;
-	neworder[k++] = cur[4]; neworder[k++] = cur[5];
-	for (i = 0; i + 1 < n; i += 2) {
-		if (order[4 + i] == cur[4] && order[5 + i] == cur[5])
-			continue;
-		if (k + 2 > (int)sizeof neworder)
-			break;
-		neworder[k++] = order[4 + i]; neworder[k++] = order[5 + i];
-	}
-	return efi_write("BootOrder", neworder, k);
 }
 
 /* ---- control socket ------------------------------------------------------- */
@@ -1485,8 +1466,6 @@ static void ctl_handle(int fd)
 	}
 	else if (strcmp(line, "bootnext") == 0)
 		reply(fd, efi_bootnext() == 0 ? "OK\n" : "ERR not booted from UEFI\n");
-	else if (strcmp(line, "bootdefault") == 0)
-		reply(fd, efi_bootdefault() == 0 ? "OK\n" : "ERR not booted from UEFI\n");
 	else if (strcmp(line, "logs") == 0) {
 		save_logs();
 		reply(fd, "OK\n");
@@ -1807,8 +1786,11 @@ int main(void)
 					shutdown_machine(LINUX_REBOOT_CMD_RESTART);
 				else if (si.ssi_signo == SIGTERM || si.ssi_signo == SIGUSR2)
 					shutdown_machine(LINUX_REBOOT_CMD_POWER_OFF);
-				else if (si.ssi_signo == SIGUSR1)
+				else if (si.ssi_signo == SIGUSR1) {
+					/* "reboot back into this system": used for remote updates */
+					efi_bootnext();
 					shutdown_machine(LINUX_REBOOT_CMD_RESTART);
+				}
 			}
 		}
 		if (ctl_slot >= 0 && (pfds[ctl_slot].revents & POLLIN)) {

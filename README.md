@@ -56,8 +56,8 @@ style as the emulator's own, backed by PID 1 over a Unix socket:
 - **Remote access (SSH)** on/off, **SSH password** (keys only until set)
 - **Hardware status** page: machine, CPU, RAM, video driver and mode,
   sound card, Wi-Fi, IP, battery, boot medium, kernel
-- **Reboot straight back into Atari** and **Make Atari the default boot**
-  (UEFI `BootNext` / `BootOrder`, so no boot-menu key hunting)
+- **Reboot straight back into Atari** (UEFI `BootNext`, a one-shot request
+  for the next start only; the machine's boot order is never touched)
 - Save logs to the stick, restart emulator, reboot, shut down
 
 Boot shows an Atari-style splash with progress lines; the first boots show

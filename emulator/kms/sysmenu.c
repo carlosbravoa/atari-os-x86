@@ -520,7 +520,6 @@ void KMS_SYSMENU_Run(void)
 			UI_MENU_ACTION(12, "Hardware status"),
 			UI_MENU_LABEL(""),
 			UI_MENU_ACTION(13, boot_item),
-			UI_MENU_ACTION(14, "Make Atari the default boot"),
 			UI_MENU_ACTION(6, "Save logs to the stick"),
 			UI_MENU_ACTION(7, "Restart emulator"),
 			UI_MENU_ACTION(8, "Reboot laptop"),
@@ -644,12 +643,7 @@ void KMS_SYSMENU_Run(void)
 			ctl_request("reboot", reply, sizeof reply);
 			done = TRUE;
 			break;
-		case 14:
-			if (ctl_request("bootdefault", reply, sizeof reply))
-				UI_driver->fMessage("Atari is now first in the UEFI boot order", TRUE);
-			else
-				UI_driver->fMessage(reply[0] ? reply : "Not booted from UEFI", TRUE);
-			break;
+
 		case 7:
 			ctl_request("restart-emulator", reply, sizeof reply);
 			done = TRUE;
