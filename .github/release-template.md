@@ -24,6 +24,28 @@ Pick one (the stick is erased):
 
 `SHA256SUMS` has the checksums (`sha256sum -c SHA256SUMS`).
 
+### Dual boot
+
+To start the Atari from a computer's own boot menu next to Linux or Windows
+instead of from a stick, use `atari-os-x86-@TAG@-files.zip` (the stick's
+files) with one of the attached scripts (Secure Boot must be off; both show
+their plan with `--dry-run` / `-WhatIf` and ask before writing anything):
+
+- **Linux** (GRUB): `sudo sh install-linux.sh --partition /dev/sdXN atari-os-x86-@TAG@-files.zip`
+  puts the files on a FAT32 partition of 1.5 GiB or more, or
+  `sudo sh install-linux.sh --image /home/atari.img atari-os-x86-@TAG@.img.xz`
+  keeps the whole image as a file on your Linux partition. The menu entry
+  "Atari" goes into GRUB's `custom.cfg`; `grub.cfg` and the default entry
+  are not touched. `--remove` takes the entry away again.
+- **Windows** (UEFI), in an administrator PowerShell:
+  `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Zip atari-os-x86-@TAG@-files.zip -ShrinkMB 2048`
+  (or `-Partition E:` for an empty FAT32 volume). It adds one firmware boot
+  entry "Atari" at the end of the boot list, so it is in the boot menu (F12,
+  F9, Esc ...); Windows stays the default. `-Remove` takes it away again.
+  Not yet tested on a real Windows machine: start with `-Check`.
+
+Details: README, "Next to Linux or Windows (dual boot)".
+
 Then start the computer from the stick (boot menu key: usually F12; F9 on
 HP, Esc or F8 on ASUS). **F8** opens the System menu (Wi-Fi, boot into
 BASIC/ASH/FujiNet, shut down), **F9** the Library.

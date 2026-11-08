@@ -85,6 +85,89 @@ laptop by hand, copy a new `atari-os/` folder onto its disk (it is a plain
 FAT32 drive) or install again from a new stick (that erases `atari/` too:
 copy anything you want to keep first).
 
+### Next to Linux or Windows (dual boot)
+
+The Atari can also live next to the system a laptop already has, and start
+from that machine's boot menu. The release has
+`atari-os-x86-<version>-files.zip` (the stick's files) and two scripts for
+this. Nothing the scripts did not say they would change is changed: no
+existing partition is formatted unless you ask, the default boot entry stays
+what it was, and nothing is written before you confirm (the partition's
+name and `yes` on Linux, the drive letter or `yes` on Windows). **Secure Boot must be off** (Limine and the Atari's kernel are
+unsigned); both scripts check and stop if it is on. `--check` / `-Check`
+shows what a script sees, `--dry-run` / `-WhatIf` the plan, and neither
+changes anything.
+
+**Linux, on a FAT32 partition** (any partition of 1.5 GiB or more that is
+not mounted, not in `/etc/fstab`, not the EFI system partition, not swap,
+LVM, RAID or encrypted; an empty FAT32 one, or with `--format` one you no
+longer need):
+
+```sh
+sudo sh install-linux.sh --partition /dev/sdb3 atari-os-x86-v0.2.0-files.zip
+sudo sh install-linux.sh --partition /dev/sdb3 --format atari-os-x86-v0.2.0-files.zip   # erases sdb3 first
+```
+
+The files are unpacked onto the partition (a normal FAT32 drive, so you can
+add your Atari files from Linux too), and the GRUB menu gets an entry
+"Atari" that starts the kernel from it (with `atari.media=<its serial>`).
+
+**Linux, as an image file** (no partitioning at all): the `.img` (or
+`.img.xz`) is copied as a file onto an ext4, btrfs or xfs filesystem, GRUB
+loop-mounts it, and the Atari uses the FAT inside it read-write (your
+library and settings live in that file):
+
+```sh
+sudo sh install-linux.sh --image /home/atari.img atari-os-x86-v0.2.0.img.xz
+```
+
+The path may only contain letters, digits and `. _ + - /`. Not on LVM or
+encrypted volumes (GRUB and the Atari cannot open those). On btrfs the
+script makes the file `chattr +C` (no copy-on-write, no compression) before
+copying. The Atari mounts that filesystem read-write, so do not hibernate
+Linux and then start the Atari.
+
+How the GRUB entry is added: a file `custom.cfg` next to `grub.cfg`
+(`/boot/grub/` or `/boot/grub2/`), which every `grub.cfg` made by
+`update-grub`/`grub2-mkconfig` reads through `/etc/grub.d/41_custom`. The
+script never edits `grub.cfg` or `/etc/default/grub` and never runs
+`update-grub`; an existing `custom.cfg` that is not its own is left alone
+(the script then prints the entry for you to add by hand, as it does when
+the GRUB does not read `custom.cfg`). Ubuntu hides the menu when Linux is
+the only system: hold **Shift** (BIOS) or press **Esc** (UEFI) right after
+power-on to see it. Where `/etc/default/grub` has `GRUB_DEFAULT=saved`,
+`sudo grub-reboot atari-os && sudo reboot` starts the Atari once (the entry
+has the id `atari-os`). `sudo sh install-linux.sh --remove` deletes the
+script's own `custom.cfg` and nothing else; the partition or image file
+stays for you to delete.
+
+**Windows (UEFI)**, from an administrator PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Check
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Zip atari-os-x86-v0.2.0-files.zip -ShrinkMB 2048
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Zip atari-os-x86-v0.2.0-files.zip -Partition E:
+```
+
+`-ShrinkMB n` (1536 to 32768) shrinks `C:` by n MB and makes a FAT32
+partition "ATARI" in the freed space (BitLocker is fine); `-Partition E:`
+uses an existing, empty FAT32 volume of 1.5 GB or more instead (the script
+never formats an existing volume). The files are unpacked onto it and the
+script adds **one firmware boot entry "Atari", appended at the end of the
+boot list**: it shows in the machine's one-time boot menu (F12, F9, F8 or
+Esc at power-on), and **the default stays Windows**; the script never
+changes the default. `-BootNow` starts the Atari once at the next restart
+and restarts. `-Menu` also puts "Atari" into the blue Windows Boot Manager
+menu, for firmware that hides added entries (that menu then shows at every
+start; some Windows versions refuse to start a non-Windows loader from it).
+`-Remove` deletes the entries again (and puts the Boot Manager timeout
+back); the partition and its files stay. The execution policy is not
+changed: `-ExecutionPolicy Bypass` applies to that one run. With Windows'
+Fast Startup on, Windows keeps the ATARI drive open over a shutdown: do not
+change its files from both Windows and the Atari between two starts (or turn
+Fast Startup off). **Tested on Windows 11 by: nobody yet.** BIOS-mode
+Windows machines: use the stick.
+
 ## How it works
 
 ```
@@ -336,7 +419,8 @@ plus `SHA256SUMS`), the emulator against Ubuntu's libraries with
 image in QEMU, BIOS and UEFI, that fails unless the emulator starts
 (screenshots and serial logs in the `smoke` artifact). Pushing a `v*` tag
 runs `release.yml`: the same workflow, then a GitHub release with the
-image, `SHA256SUMS` and `flash.sh`, its text from
+image, the dual-boot files zip, `SHA256SUMS`, `flash.sh`,
+`install-linux.sh` and `install-windows.ps1`, its text from
 `.github/release-template.md` above the generated notes. `CHANGELOG.md`
 lists the changes. `tests/flash-test.sh` tests `flash.sh` without touching
 any disk (`--to-file` and a faked disk list).
@@ -391,6 +475,29 @@ QEMU_VARS=build/qemu-test/vars.fd QEMU_DISK=build/install-test.img scripts/qemu-
 QEMU_VARS=build/qemu-test/vars.fd QEMU_IMG=build/install-test.img QEMU_IMG_AS=ide scripts/qemu-test.sh start uefi
 ```
 
+The dual-boot paths have their own test disks. `QEMU_KERNEL=1` boots
+without any stick: QEMU loads `build/stick/atari-os/vmlinuz` and
+`initramfs` itself (`-kernel`/`-initrd`) with the first `cmdline:` of
+`build/stick/limine.conf`, the serial shell and `$QEMU_APPEND`, the way a
+host's boot loader starts us. `scripts/mk-hostfs-test.sh` makes
+`build/hostfs-test.img`, a 4 GiB ext4 filesystem (no partition table,
+`mkfs.ext4 -d`, no root needed) holding the image as
+`/atari/atari-os-x86.img`; `scripts/mk-grub-test.sh partition|image` (in
+the Alpine env, after `apk add grub grub-bios e2fsprogs`) makes
+`build/grub-test.img`, a disk with a BIOS GRUB, a `grub.cfg` in the shape
+`grub-mkconfig` writes and the `custom.cfg` that `install-linux.sh` writes
+(its own functions), booting the FAT32 partition 2 or the image file on the
+ext4 partition 1 (`GRUB_EFI=1` adds an x86_64-efi GRUB on partition 2 for
+`start uefi`):
+
+```sh
+scripts/mk-hostfs-test.sh
+QEMU_KERNEL=1 QEMU_DISK=build/hostfs-test.img \
+  QEMU_APPEND="atari.image=a7a12000-0000-4000-8000-000000000001:/atari/atari-os-x86.img" scripts/qemu-test.sh start
+scripts/alpine-env.sh run scripts/mk-grub-test.sh image
+QEMU_IMG=build/grub-test.img QEMU_IMG_AS=ide scripts/qemu-test.sh start bios
+```
+
 The socket commands behind it are `disks` (`disk <name> <bytes> <model>`
 lines) and `install <name>` (streams `step <text>` and `progress <pct>`
 lines, then `OK` or `ERR <text>`); `status` has `media
@@ -404,7 +511,10 @@ command `perf on|off` does the same at run time), `atari.debug=1` (serial shell,
 `-evdev-debug -kms-debug` on the emulator, emulator exit restarts instead of
 powering off), `atari.noemu=1`, `atari.emudelay=N`, `atari.nomedia=1`,
 `atari.media=XXXX-XXXX` (use the FAT32 volume with that serial as the
-stick; the installer sets it),
+stick; the installers set it), `atari.image=<UUID>:<path>` (loopback mode:
+mount the filesystem with that UUID read-write on `/.host` and use the image
+file at `<path>` on it as the stick; `install-linux.sh --image` sets it, and
+`status` then has a line `image <device> <path>`),
 `atari.hwsim=1` (two virtual Wi-Fi radios via `mac80211_hwsim`, so the
 Wi-Fi menu can be exercised in QEMU against an access point started on
 `wlan1` from the debug shell). `QEMU_NONET=1` starts QEMU without a

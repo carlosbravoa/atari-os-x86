@@ -367,6 +367,19 @@ static void hardware_page(const char *status)
 	status_get(status, "media", v, sizeof v, "?");
 	status_get(status, "efi", w, sizeof w, "?");
 	add_line(page, &n, sizeof page, "Media: %s, UEFI %s", v, w);
+	/* loopback mode (atari.image): "image <dev> <path>", the path's tail
+	   when it is longer than the line */
+	status_get(status, "image", v, sizeof v, "");
+	if (v[0]) {
+		char *path = strchr(v, ' ');
+		if (path) {
+			size_t plen;
+			*path++ = '\0';
+			plen = strlen(path);
+			add_line(page, &n, sizeof page, "Image on %.20s:", v);
+			add_line(page, &n, sizeof page, "  %s%s", plen > 34 ? "..." : "", plen > 34 ? path + plen - 31 : path);
+		}
+	}
 	boot_of(status, v, sizeof v);
 	status_get(status, "ssh", w, sizeof w, "?");
 	add_line(page, &n, sizeof page, "Boot: %s, SSH %s", boot_label(v), w);

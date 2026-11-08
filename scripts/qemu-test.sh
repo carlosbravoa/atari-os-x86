@@ -32,6 +32,15 @@
 # of a USB stick (booting an installed disk). QEMU_VARS=<file> gives OVMF a
 # persistent variable store (created from OVMF_VARS_4M.fd if missing), so
 # firmware boot entries outlive the run.
+#
+# QEMU_KERNEL=1 boots without any stick: QEMU loads kernel and initramfs
+# itself (-kernel/-initrd from $QEMU_KERNEL_DIR, default build/stick/atari-os)
+# with the first cmdline: of build/stick/limine.conf plus
+# "console=ttyS0,115200 atari.debug=1" and $QEMU_APPEND. That is how a
+# boot loader on the host disk starts us (the loopback install; the disk
+# from scripts/mk-hostfs-test.sh goes in QEMU_DISK):
+#   QEMU_KERNEL=1 QEMU_DISK=build/hostfs-test.img \
+#     QEMU_APPEND="atari.image=<uuid>:/atari/atari-os-x86.img" scripts/qemu-test.sh start
 
 set -eu
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -98,7 +107,15 @@ PY
 case "${1:-}" in
 start)
 	MODE="${2:-bios}"
-	[ -f "$IMG" ] || { echo "no image at $IMG (QEMU_IMG)" >&2; exit 1; }
+	if [ -n "${QEMU_KERNEL:-}" ]; then
+		KDIR="${QEMU_KERNEL_DIR:-$PROJECT/build/stick/atari-os}"
+		[ -f "$KDIR/vmlinuz" ] && [ -f "$KDIR/initramfs" ] || { echo "no vmlinuz/initramfs in $KDIR (QEMU_KERNEL_DIR)" >&2; exit 1; }
+		KCONF="$KDIR/../limine.conf"
+		KCMD=$(sed -n 's/^[[:space:]]*cmdline:[[:space:]]*//p' "$KCONF" 2>/dev/null | head -n 1)
+		KCMD="$KCMD console=ttyS0,115200 atari.debug=1 ${QEMU_APPEND:-}"
+	else
+		[ -f "$IMG" ] || { echo "no image at $IMG (QEMU_IMG)" >&2; exit 1; }
+	fi
 	FW=""
 	if [ "$MODE" = uefi ]; then
 		for f in ${OVMF_CODE:-} /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
@@ -141,15 +158,18 @@ start)
 		DISKS="$DISKS -drive if=none,id=hd$i,format=raw,snapshot=off,file=$file -device $dev"
 		i=$((i + 1))
 	done
+	STICK="-drive if=none,id=stick,format=raw,file=$IMG $MAIN"
+	[ -z "${QEMU_KERNEL:-}" ] || STICK=""
 	ACCEL="-cpu max"; [ -w /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
 	NET="-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8000-:8000,hostfwd=tcp:127.0.0.1:2222-:22 -device e1000e,netdev=n0"
 	[ -n "${QEMU_NONET:-}" ] && NET="-nic none"
 	rm -f "$D"/*.sock "$D"/serial.log
+	set --
+	[ -z "${QEMU_KERNEL:-}" ] || set -- -kernel "$KDIR/vmlinuz" -initrd "$KDIR/initramfs" -append "$KCMD"
 	# shellcheck disable=SC2086
 	nohup qemu-system-x86_64 $ACCEL $FW -m 1024 -smp 2 -machine q35 \
 		-device qemu-xhci,id=xhci \
-		-drive if=none,id=stick,format=raw,file="$IMG" \
-		$MAIN $DISKS \
+		$STICK $DISKS "$@" \
 		-device usb-kbd -vga std \
 		$NET \
 		-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \

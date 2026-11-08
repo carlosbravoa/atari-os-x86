@@ -1,5 +1,6 @@
 # On a v* tag: the whole build workflow (image, host build, QEMU smoke
-# boot), then a GitHub release with the image, its checksums and flash.sh.
+# boot), then a GitHub release with the image, the dual-boot files zip, its
+# checksums, flash.sh and the two dual-boot installers.
 name: release
 
 on:
@@ -30,9 +31,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          ls build/atari-os-x86-"$TAG".img.xz   # the image must carry the tag's version
-          (cd scripts && sha256sum flash.sh) >> build/SHA256SUMS
+          ls build/atari-os-x86-"$TAG".img.xz build/atari-os-x86-"$TAG"-files.zip   # both must carry the tag's version
+          (cd scripts && sha256sum flash.sh install-linux.sh install-windows.ps1) >> build/SHA256SUMS
+          cat build/SHA256SUMS
           sed -e "s|@TAG@|$TAG|g" -e "s|@REPO@|$GITHUB_REPOSITORY|g" .github/release-template.md > build/notes.md
           # --notes text goes above the generated notes
-          gh release create "$TAG" build/atari-os-x86-*.img.xz build/SHA256SUMS scripts/flash.sh \
+          gh release create "$TAG" build/atari-os-x86-*.img.xz build/atari-os-x86-*-files.zip build/SHA256SUMS \
+            scripts/flash.sh scripts/install-linux.sh scripts/install-windows.ps1 \
             --verify-tag --title "atari-os-x86 $TAG" --generate-notes --notes "$(cat build/notes.md)"

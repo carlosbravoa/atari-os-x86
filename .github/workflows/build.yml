@@ -60,19 +60,21 @@ jobs:
         run: |
           cd build
           img=$(ls atari-os-x86-*.img)
+          zip=$(ls atari-os-x86-*-files.zip)   # the dual-boot files (mkimage.sh)
           xz -T0 -6 -k -f "$img"
-          sha256sum "$img.xz" > SHA256SUMS
+          sha256sum "$img.xz" "$zip" > SHA256SUMS
           cat SHA256SUMS
-          ls -la "$img" "$img.xz"
+          ls -la "$img" "$img.xz" "$zip"
 
       - uses: actions/upload-artifact@v4
         with:
           name: image
           path: |
             build/atari-os-x86-*.img.xz
+            build/atari-os-x86-*-files.zip
             build/SHA256SUMS
           if-no-files-found: error
-          compression-level: 0   # already xz
+          compression-level: 0   # already xz / zip
 
   host-build:
     # The -Werror check: atari800's configure appends -Werror, and the port

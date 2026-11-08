@@ -5,7 +5,10 @@
 #
 # Produces build/atari-os-x86-<version>.img (and build/atari-os.img, a hard
 # link to it, for the local scripts): an MBR disk with one FAT32 partition
-# that boots on BIOS and UEFI through Limine. Layout of the stick:
+# that boots on BIOS and UEFI through Limine, plus
+# build/atari-os-x86-<version>-files.zip, the same files for the dual-boot
+# installers (scripts/install-linux.sh, scripts/install-windows.ps1).
+# Layout of the stick:
 #
 #   /EFI/BOOT/BOOTX64.EFI     UEFI loader (Limine)
 #   /limine-bios.sys          BIOS loader stage (plus code in the MBR)
@@ -47,11 +50,18 @@ FIRMWARE_PKGS="linux-firmware-i915 linux-firmware-radeon linux-firmware-nvidia l
 	linux-firmware-intel sof-firmware wireless-regdb"
 
 # Modules that must be inside the initramfs: enough to see the stick and
-# the keyboard before the modloop is available. Dependencies are resolved.
+# the keyboard before the modloop is available. Dependencies are resolved
+# (modules.dep), soft dependencies are not.
 INITRAMFS_MODULES="evdev usbhid hid-generic xhci-pci xhci-hcd ehci-pci ehci-hcd
 	ohci-pci ohci-hcd uhci-hcd usb-storage uas sd_mod ahci nvme mmc_block sdhci-pci
 	loop squashfs vfat nls_cp437 nls_iso8859-1 nls_utf8 exfat ntfs3 button
 	virtio_pci virtio_blk virtio_input virtio_scsi bochs af_packet"
+# The host filesystems of the loopback install (the image as a file on a
+# Linux partition: atari.image=, scripts/install-linux.sh --image), with
+# btrfs's checksum drivers (soft dependencies). They are big (3.6 MB as
+# .ko.gz), so in the initramfs they are recompressed as .ko.xz (2.4 MB;
+# busybox modprobe unpacks xz like gzip); the modloop keeps the originals.
+LOOPBACK_FS_MODULES="ext4 xfs btrfs crc32c-cryptoapi xxhash_generic blake2b_generic"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -75,6 +85,7 @@ case "$VERSION" in
 esac
 [ ${#VERSION} -le 40 ] || die "version string too long: $VERSION"
 OUT=$BUILD/atari-os-x86-$VERSION.img
+ZIP=$BUILD/atari-os-x86-$VERSION-files.zip   # the stick's files, for the dual-boot scripts
 LINK=$BUILD/atari-os.img    # stable name for run-qemu.sh, qemu-test.sh, mk-ventoy-test.sh
 log "Version $VERSION"
 
@@ -220,11 +231,22 @@ resolve_mods() {
 	done | tr ':' ' ' | tr -s ' ' '\n' | sed '/^$/d' | sort -u
 }
 # shellcheck disable=SC2086
-resolve_mods $INITRAMFS_MODULES | while read -r rel; do
+resolve_mods $INITRAMFS_MODULES $LOOPBACK_FS_MODULES | while read -r rel; do
 	mkdir -p "$INITRAMFS/lib/modules/$KVER/$(dirname "$rel")"
 	cp "$MODDIR/$rel" "$INITRAMFS/lib/modules/$KVER/$rel"
 done
-log "initramfs modules: $(find "$INITRAMFS/lib/modules" -name '*.ko*' | wc -l)"
+# shellcheck disable=SC2086
+resolve_mods $LOOPBACK_FS_MODULES | while read -r rel; do
+	case "$rel" in *.ko.gz) ;; *) continue ;; esac
+	f=$INITRAMFS/lib/modules/$KVER/$rel
+	gzip -dc "$f" | xz -9e --check=crc32 -c > "${f%.gz}.xz"
+	rm "$f"
+	sed -i "s|^$rel:|${rel%.gz}.xz:|; s| $rel\$| ${rel%.gz}.xz|; s| $rel | ${rel%.gz}.xz |g" \
+		"$INITRAMFS/lib/modules/$KVER/modules.dep"
+done
+rm -f "$INITRAMFS/lib/modules/$KVER/modules.dep.bin" # stale now; busybox reads modules.dep
+log "initramfs modules: $(find "$INITRAMFS/lib/modules" -name '*.ko*' | wc -l)," \
+	"loopback filesystems $(find "$INITRAMFS/lib/modules" -name '*.ko.xz' -exec cat {} + | wc -c) bytes (xz)"
 
 (cd "$INITRAMFS" && find . | cpio -o -H newc --quiet | zstd -T0 -19 -q -o "$BUILD/initramfs.zst" -f)
 ls -la "$BUILD/initramfs.zst"
@@ -345,11 +367,11 @@ EOF
 
 # ---- 5. disk image --------------------------------------------------------
 log "Creating $OUT (${IMG_MB} MB)"
-rm -f "$OUT" "$LINK"
+rm -f "$OUT" "$LINK" "$ZIP"
 if [ "${KEEP_OLD_IMAGES:-0}" != 1 ]; then
-	for old in "$BUILD"/atari-os-x86-*.img; do
+	for old in "$BUILD"/atari-os-x86-*.img "$BUILD"/atari-os-x86-*-files.zip; do
 		[ -f "$old" ] || continue
-		log "Removing older image $(basename "$old")"
+		log "Removing older $(basename "$old")"
 		rm -f "$old"
 	done
 fi
@@ -364,4 +386,10 @@ limine bios-install "$OUT" >/dev/null 2>&1
 # (run-qemu.sh boots without -snapshot) changes both.
 ln -f "$OUT" "$LINK"
 ls -la "$OUT" "$LINK"
+
+# ---- 6. the same files as a zip (dual boot: install-linux.sh --partition,
+# install-windows.ps1): the stick's FAT content, nothing else.
+log "Creating $(basename "$ZIP")"
+(cd "$STICK" && zip -r -X -q "$ZIP" .)
+ls -la "$ZIP"
 log "Done. $(basename "$OUT") ($VERSION). Boot with: scripts/run-qemu.sh [bios|uefi]"

@@ -26,6 +26,13 @@
  *   atari.media=XXXX-XXXX  the FAT32 volume serial of the copy we were
  *                      booted from (set by the installer on an internal
  *                      disk): that partition is used as /media first
+ *   atari.image=UUID:/path  loopback mode (scripts/install-linux.sh --image):
+ *                      the release image is a file at /path on the host
+ *                      filesystem with that UUID (ext4, btrfs, xfs; also
+ *                      vfat, exfat, ntfs). That filesystem is mounted
+ *                      read-write on /.host, the file is loop-attached and
+ *                      the FAT inside it becomes /media. Like atari.media,
+ *                      for the first 5 s nothing else is tried.
  *
  * Licence: GPL-2.0-or-later, like the emulator it serves.
  */
@@ -44,6 +51,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -67,7 +75,7 @@
 #include <linux/reboot.h>
 
 #define MEDIA        "/media"
-#define HOSTFS       "/.host"   /* partition holding atari-os*.img (Ventoy) */
+#define HOSTFS       "/.host"   /* partition holding atari-os*.img (Ventoy, atari.image) */
 #define MEDIA_OS     MEDIA "/atari-os"
 #define MEDIA_USER   MEDIA "/atari"
 #define MODLOOP_IMG  MEDIA_OS "/modloop.sqfs"
@@ -126,6 +134,11 @@ static struct {
 static int efi_ok = 0;
 static char media_kind[32] = "none"; /* stick, image-file, disk (installed) or none */
 static char media_serial[16] = "";   /* atari.media=: FAT32 serial to prefer */
+static char image_uuid[48] = "";     /* atari.image=<UUID>:<path> (loopback mode) */
+static char image_path[256] = "";
+static char image_dev[32] = "";      /* "sda2": the host filesystem, once mounted */
+static int image_loop = -1;          /* loop device of the image file (Ventoy or atari.image) */
+static int modloop_loop = -1;        /* loop device of the modloop squashfs */
 static pid_t install_pid = -1;       /* the installer child, one at a time */
 /* Build version, one line in /etc/atari-os-release (scripts/mkimage.sh). */
 static char os_version[48] = "unknown";
@@ -738,7 +751,9 @@ static void uevent_read(void)
 /* ---- boot media -------------------------------------------------------- */
 
 static int try_image_file(const char *dev);
+static int try_image_uuid(void);
 static int disk_of(const char *link, char *out, size_t size);
+static void blkid_tag(const char *line, const char *key, char *out, size_t size);
 
 static int try_mount_media(const char *dev)
 {
@@ -816,6 +831,16 @@ static int scan_block_devices(int waited)
 	char dev[320], serial[16];
 	int pass, found = 0;
 
+	/* atari.image=<UUID>:<path> (GRUB loopback): the image file we were
+	   booted from, before everything else and, for the first seconds,
+	   instead of everything else. */
+	if (image_uuid[0]) {
+		found = try_image_uuid();
+		if (found || waited < 5000)
+			return found;
+		if (waited == 5000)
+			logmsg("media: no filesystem with UUID %s holding %s, looking further", image_uuid, image_path);
+	}
 	/* atari.media=<serial> (an installed disk's limine.conf): the copy we
 	   were booted from comes first. For the first seconds nothing else
 	   will do, the disk may not have shown up yet. */
@@ -916,6 +941,45 @@ static int attach_loop(const char *image, int partscan, int writable)
 	return num;
 }
 
+static void detach_loop(int num)
+{
+	char path[32];
+	int fd;
+	snprintf(path, sizeof path, "/dev/loop%d", num);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		ioctl(fd, LOOP_CLR_FD, 0);
+		close(fd);
+	}
+}
+
+/* The part shared by Ventoy and atari.image: loop-attach the image file
+   IMG (read-write, with partitions) and mount its first partition, the
+   FAT, as /media. 1 when that FAT is ours (it has the modloop). */
+static int mount_image_file(const char *img)
+{
+	char part[48];
+	int num, tries;
+
+	num = attach_loop(img, 1, 1);
+	if (num < 0)
+		return 0;
+	snprintf(part, sizeof part, "/dev/loop%dp1", num);
+	for (tries = 0; tries < 20 && !exists(part); tries++)
+		sleep_ms(50);
+	if (mount(part, MEDIA, "vfat", MS_NOATIME | MS_NODEV | MS_NOSUID,
+	          "flush,shortname=mixed,errors=continue") == 0) {
+		if (exists(MODLOOP_IMG)) {
+			image_loop = num;
+			snprintf(media_kind, sizeof media_kind, "image-file");
+			return 1;
+		}
+		umount2(MEDIA, MNT_DETACH);
+	}
+	detach_loop(num);
+	return 0;
+}
+
 /* Ventoy (or any stick with our image copied onto it as a file): the
    kernel and initramfs were loaded by the firmware-side loader, but the
    FAT inside the image is what we want as /media. Find the image file on
@@ -933,32 +997,92 @@ static int try_image_file(const char *dev)
 			continue;
 		d = opendir(HOSTFS);
 		while (d && !found && (e = readdir(d)) != NULL) {
-			char img[400], part[48];
+			char img[400];
 			size_t len = strlen(e->d_name);
-			int num, tries;
 			if (strncmp(e->d_name, "atari-os", 8) != 0 || len < 4
 			    || strcmp(e->d_name + len - 4, ".img") != 0)
 				continue;
 			snprintf(img, sizeof img, HOSTFS "/%s", e->d_name);
-			num = attach_loop(img, 1, 1);
-			if (num < 0)
-				continue;
-			snprintf(part, sizeof part, "/dev/loop%dp1", num);
-			for (tries = 0; tries < 20 && !exists(part); tries++)
-				sleep_ms(50);
-			if (mount(part, MEDIA, "vfat", MS_NOATIME | MS_NODEV | MS_NOSUID,
-			          "flush,shortname=mixed,errors=continue") == 0) {
-				if (exists(MODLOOP_IMG)) {
-					logmsg("using image file %s on %s (%s)", e->d_name, dev, fstypes[i]);
-					snprintf(media_kind, sizeof media_kind, "image-file");
-					found = 1;
-				}
-				else
-					umount2(MEDIA, MNT_DETACH);
+			if (mount_image_file(img)) {
+				logmsg("using image file %s on %s (%s)", e->d_name, dev, fstypes[i]);
+				found = 1;
 			}
 		}
 		if (d)
 			closedir(d);
+		if (!found)
+			umount2(HOSTFS, MNT_DETACH);
+	}
+	return found;
+}
+
+/* atari.image=<UUID>:<path> (loopback mode, scripts/install-linux.sh):
+   GRUB loaded the kernel from inside an image file on a Linux partition.
+   Find the filesystem with that UUID (one busybox blkid for all devices
+   per call), mount it read-write on /.host with the type blkid reports,
+   and use the image file as in try_image_file. */
+static int try_image_uuid(void)
+{
+	static int loaded[8];
+	static const char *const types[][2] = {
+		{ "ext4", "ext4" }, { "ext3", "ext4" }, { "ext2", "ext4" }, { "xfs", "xfs" },
+		{ "btrfs", "btrfs" }, { "vfat", "vfat" }, { "exfat", "exfat" }, { "ntfs", "ntfs3" }
+	};
+	char *blkid[] = { BUSYBOX, "blkid", NULL };
+	static char out[8192];
+	char *line, *next;
+	int found = 0;
+
+	if (run_output(blkid, out, sizeof out) < 0)
+		return 0;
+	for (line = out; line && *line && !found; line = next) {
+		char dev[48], uuid[64], type[16], img[300];
+		const char *fstype = NULL, *opts = "";
+		char *colon;
+		int i, ti = -1;
+		next = strchr(line, '\n');
+		if (next)
+			*next++ = '\0';
+		colon = strchr(line, ':');
+		if (!colon || strncmp(line, "/dev/", 5) != 0 || (size_t)(colon - line) >= sizeof dev)
+			continue;
+		memcpy(dev, line, (size_t)(colon - line));
+		dev[colon - line] = '\0';
+		blkid_tag(colon, "UUID", uuid, sizeof uuid);
+		blkid_tag(colon, "TYPE", type, sizeof type);
+		if (strcasecmp(uuid, image_uuid) != 0 || strncmp(dev + 5, "loop", 4) == 0)
+			continue;
+		for (i = 0; i < (int)(sizeof types / sizeof types[0]); i++)
+			if (strcmp(type, types[i][0]) == 0)
+				ti = i;
+		if (ti < 0) {
+			logmsg("media: %s has UUID %s but filesystem '%s' is not supported (atari.image)", dev, uuid, type);
+			continue;
+		}
+		fstype = types[ti][1];
+		/* ext4, xfs, btrfs: nothing else loads them (initramfs modules) */
+		if (!loaded[ti]) {
+			char *mp[] = { BUSYBOX, "modprobe", "-q", (char *)fstype, NULL };
+			run(mp);
+			loaded[ti] = 1;
+		}
+		if (strcmp(fstype, "vfat") == 0)
+			opts = "flush,shortname=mixed,errors=continue";
+		mkdir_p(HOSTFS, 0755);
+		if (mount(dev, HOSTFS, fstype, MS_NOATIME | MS_NODEV | MS_NOSUID, opts) != 0) {
+			logmsg("media: cannot mount %s (%s) read-write: %s (atari.image)", dev, fstype, strerror(errno));
+			continue;
+		}
+		snprintf(img, sizeof img, HOSTFS "%s", image_path);
+		if (!exists(img))
+			logmsg("media: no %s on %s (atari.image)", image_path, dev);
+		else if (mount_image_file(img)) {
+			snprintf(image_dev, sizeof image_dev, "%.31s", dev + 5);
+			logmsg("media: image file %s on %s (%s, read-write; atari.image)", image_path, dev, fstype);
+			found = 1;
+		}
+		else
+			logmsg("media: %s on %s is not an atari-os image (atari.image)", image_path, dev);
 		if (!found)
 			umount2(HOSTFS, MNT_DETACH);
 	}
@@ -979,6 +1103,7 @@ static void mount_modloop(void)
 		logmsg("modloop: mount failed: %s", strerror(errno));
 		return;
 	}
+	modloop_loop = num;
 	/* The initramfs carries a module subset at /lib/modules; the full set
 	   goes over the top of it. Firmware is only in the modloop. */
 	mkdir_p("/lib/modules", 0755);
@@ -2750,6 +2875,11 @@ static void cmd_status(int fd)
 	reply(fd, line);
 	snprintf(line, sizeof line, "usb %d\ninstallable %d\n", usb_count, install_count());
 	reply(fd, line);
+	if (image_dev[0]) {
+		/* loopback mode (atari.image): host device and the image's path on it */
+		snprintf(line, sizeof line, "image %s %s\n", image_dev, image_path);
+		reply(fd, line);
+	}
 	snprintf(line, sizeof line, "version %s\n", os_version);
 	reply(fd, line);
 	{
@@ -3108,9 +3238,26 @@ static void shutdown_machine(int how)
 	kill(-1, SIGKILL);
 	sync();
 	usb_unmount_all();
-	if (media_mounted)
-		umount2(MEDIA, 0);
-	umount2(HOSTFS, 0); /* image-file (Ventoy) case; harmless otherwise */
+	/* The modloop file lives on /media and keeps it busy: let go of it
+	   first, so /media (and below it a host filesystem) unmounts clean. */
+	if (modloop_loop >= 0) {
+		umount2("/lib/firmware", MNT_DETACH);
+		umount2("/lib/modules", MNT_DETACH);
+		if (umount2(MODLOOP_MNT, 0) != 0)
+			umount2(MODLOOP_MNT, MNT_DETACH);
+		detach_loop(modloop_loop);
+	}
+	if (media_mounted && umount2(MEDIA, 0) != 0)
+		logmsg("shutdown: %s stays mounted: %s", MEDIA, strerror(errno));
+	/* image-file case (Ventoy, atari.image): the loop device keeps the
+	   file open, so drop it before the host filesystem; if that still
+	   cannot be unmounted, at least leave it clean (read-only). */
+	if (image_loop >= 0)
+		detach_loop(image_loop);
+	if (umount2(HOSTFS, 0) != 0 && errno == EBUSY) {
+		logmsg("shutdown: %s busy, remounting it read-only", HOSTFS);
+		mount(NULL, HOSTFS, NULL, MS_REMOUNT | MS_RDONLY, NULL);
+	}
 	sync();
 	reboot(how);
 	for (;;)
@@ -3194,6 +3341,20 @@ static void parse_cmdline(void)
 		}
 	}
 	{
+		/* atari.image=<UUID>:<path>; the path is absolute on that
+		   filesystem, without spaces (the kernel command line has no
+		   quoting we rely on) and without "..". */
+		const char *p = strstr(buf, "atari.image=");
+		if (p && sscanf(p + strlen("atari.image="), "%40[0-9A-Za-z-]:%255s", image_uuid, image_path) == 2
+		    && image_path[0] == '/' && !strstr(image_path, "/../") && strcmp(image_path, "/..") != 0
+		    && (strlen(image_path) < 3 || strcmp(image_path + strlen(image_path) - 3, "/..") != 0))
+			;
+		else if (p) {
+			image_uuid[0] = '\0';
+			snprintf(image_path, sizeof image_path, "?"); /* logged in main */
+		}
+	}
+	{
 		const char *p = strstr(buf, "atari.emudelay=");
 		if (p)
 			emudelay = atoi(p + strlen("atari.emudelay="));
@@ -3218,6 +3379,10 @@ int main(void)
 	if (read_file("/etc/atari-os-release", os_version, sizeof os_version) <= 0)
 		snprintf(os_version, sizeof os_version, "unknown");
 	logmsg("atari-os-x86 %s init starting%s", os_version, debug ? " (debug)" : "");
+	if (image_uuid[0])
+		logmsg("media: atari.image: %s on the filesystem with UUID %s", image_path, image_uuid);
+	else if (image_path[0])
+		logmsg("media: atari.image= not understood (want <UUID>:/<path>), ignored");
 
 	/* Ctrl+Alt+Del and SIGTERM come to us; children are reaped below. */
 	reboot(LINUX_REBOOT_CMD_CAD_OFF);

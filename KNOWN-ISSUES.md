@@ -27,14 +27,49 @@
 - **Installing onto the laptop's disk** (F8): Secure Boot must be off on
   UEFI machines (Limine is unsigned), as for the stick. The installer
   makes exactly one partition over the whole disk and erases everything
-  else; there is no dual boot from the menu (a Linux-host script and a
-  Windows installer for that are separate, later work). The partition
+  else; there is no dual boot from the menu (that is what
+  `install-linux.sh` and `install-windows.ps1` are for). The partition
   table is MBR, so on disks over 2 TiB only the first 2 TiB are used.
   Some UEFI firmware ignores or drops boot entries written by the OS; such
   a laptop still boots the disk through the removable-media path
   (`\EFI\BOOT\BOOTX64.EFI`) once nothing else comes first in its boot
   order. Tested in QEMU (SeaBIOS, OVMF; SATA, NVMe, virtio), not yet on a
   real laptop.
+- **Dual boot** (`install-linux.sh`, `install-windows.ps1`):
+  - The **Windows script has not been run on Windows yet** (written against
+    PowerShell 5.1's cmdlets, but untested; there was no PowerShell to even
+    parse-check it). `-Check` and `-WhatIf` are safe first steps and work
+    without administrator rights. `bcdedit`'s messages are localised, so the
+    script goes by its exit codes and parses only `{GUID}`s and the
+    `displayorder`/`timeout`/`path`/`description` lines.
+  - `-Menu` (the Windows Boot Manager entry) shows the blue chooser at every
+    start, and Boot Manager may refuse to start Limine (an unsigned,
+    non-Windows loader); the firmware's own boot menu is the reliable way.
+  - Windows **Fast Startup** keeps the ATARI drive mounted in its hibernated
+    session: files changed on it from both sides between two starts can be
+    lost. Turn Fast Startup off, or change the files from one side only.
+  - Some UEFI firmware ignores or drops boot entries an OS adds (as for the
+    whole-disk installer); then the Atari is not in the boot menu. `-Menu`
+    is the fallback there.
+  - A **GRUB without `41_custom`** (hand-written `grub.cfg`, some
+    distributions' custom setups) does not read `custom.cfg`: the Linux
+    script then installs the files and prints the entry to add by hand
+    (exit status 2). Tested with upstream GRUB 2.14 (BIOS and UEFI) in QEMU,
+    both modes; not yet with a distribution's signed EFI GRUB (shim, Secure
+    Boot off) on real hardware.
+  - **Loopback mode on btrfs**: the image needs `chattr +C` (no
+    copy-on-write, no compression), which the script applies to the new
+    file; an image copied there by hand on a compressed btrfs cannot be
+    read by GRUB. Subvolume layouts are handled through the mount's
+    FSROOT (Ubuntu's `@`, Fedora's `root`), but a btrfs whose default
+    subvolume is not the top level (openSUSE snapshots) is not supported:
+    init mounts the default subvolume. Tested in QEMU on ext4 and btrfs;
+    xfs is built in but untested.
+  - Loopback mode mounts the host's filesystem **read-write**: never start
+    the Atari from a Linux that is hibernated. LVM and LUKS volumes are
+    refused (init cannot open them).
+  - The loopback filesystems (ext4, xfs, btrfs) add 2.4 MB to the
+    initramfs (kept as `.ko.xz` there; 3.4 MB as `.ko.gz`).
 - **Local disks with Boot into: FujiNet** load at standard SIO speed
   (19200 baud, like a real 810: ~20 s for a 90 KB boot): NetSIO turns
   atari800's SIO patch off, so a local D1: answers on the emulated serial
