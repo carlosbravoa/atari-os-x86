@@ -12,9 +12,14 @@ stays unused for now.
 
 Pick one (the stick is erased):
 
-- **Windows**: [balenaEtcher](https://etcher.balena.io/) takes the
-  `.img.xz` as it is. [Rufus](https://rufus.ie/) also works: unpack it
-  first (7-Zip) and write it in **DD mode**.
+- **Windows**: [balenaEtcher](https://etcher.balena.io/): *Flash from
+  file* → the `.img.xz` (no unpacking) → *Select target* → your stick →
+  *Flash!*. Click **Cancel** if Windows offers to format or scan the
+  stick afterwards; it then appears as a drive called **ATARI**, and you
+  can drop games into `atari\library` before ejecting it safely.
+  [Rufus](https://rufus.ie/) also works in **DD Image** mode (unpack with
+  7-Zip first if it does not take the `.xz`). Step by step: README,
+  "Writing the stick on Windows".
 - **Linux and macOS**: `flash.sh` (attached) lists only USB sticks and SD
   cards, asks you to type the device name and `yes`, writes and reads the
   stick back to verify it:

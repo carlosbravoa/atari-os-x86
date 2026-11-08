@@ -19,9 +19,7 @@ Download `atari-os-x86-<version>.img.xz` from the latest
 macOS), then write it to a USB stick or SD card of 1 GB or more. Writing
 erases the stick. Pick one:
 
-- **Windows**: [balenaEtcher](https://etcher.balena.io/) writes the
-  `.img.xz` as it is; [Rufus](https://rufus.ie/) works too, on the
-  unpacked `.img` (7-Zip), in **DD mode**.
+- **Windows**: see "Writing the stick on Windows" just below.
 - **Linux and macOS**: `flash.sh` only ever offers USB sticks and SD cards
   (never a disk holding `/`, `/home`, swap and the like, nothing over
   512 GiB), makes you type the device name and `yes`, then writes and reads
@@ -40,6 +38,32 @@ Then boot the laptop from USB: open its boot menu while it starts (usually
 F12; F9 on HP, Esc or F8 on ASUS) and pick the stick. On UEFI machines
 Secure Boot must be off. The Atari comes up at `READY`; **F8** is the System
 menu, **F9** the Library.
+
+### Writing the stick on Windows
+
+You need the `.img.xz` file, a USB stick of 1 GB or more (everything on
+it is erased) and [balenaEtcher](https://etcher.balena.io/), a free tool
+that writes disk images and only lists removable drives.
+
+1. Install and start balenaEtcher.
+2. **Flash from file**: pick `atari-os-x86-<version>.img.xz`. No need to
+   unpack it; Etcher reads `.xz` directly.
+3. **Select target**: your USB stick. Check the size shown is the stick's.
+   Etcher hides your system disks, but it does show other USB drives.
+4. **Flash!** Windows asks for administrator permission; allow it. Writing
+   takes one to three minutes, then Etcher reads the stick back to verify.
+5. When Windows pops up "You need to format the disk" or "Scan and fix",
+   choose **Cancel** / **Continue without scanning**. The stick is fine.
+6. The stick now shows up as a drive called **ATARI**. Drop your games
+   into its `atari\library` folder if you like, then **eject it safely**
+   (the tray icon) before pulling it out.
+
+Alternatives: [Rufus](https://rufus.ie/) also works, in **DD Image** mode;
+if your Rufus does not accept the `.xz` file, unpack it first with
+[7-Zip](https://www.7-zip.org/) and give Rufus the `.img`. Any tool that
+writes raw images (Win32 Disk Imager, Raspberry Pi Imager's "Use custom")
+does the same job: the stick ends up with one FAT32 partition and the boot
+loader in its first sectors, which is why a plain file copy is not enough.
 
 The stick stays an ordinary, writable FAT32 drive: your library, settings
 and FujiNet's SD folder live in its `atari/` folder, and you can add files
