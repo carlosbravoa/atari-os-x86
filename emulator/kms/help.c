@@ -41,7 +41,9 @@
 int KMS_HELP_requested = FALSE;
 
 /* Lines of the list; a line starting with '#' is a section title (a
-   label). The keyboard type block is inserted where "@KEYBOARD" is.
+   label), one starting with '!' a label in inverse video (bit 7 set per
+   character, ui_basic.c's Plot). The keyboard type block is inserted
+   where "@KEYBOARD" is.
    Every line is at most 38 columns. The Atari font has no backtick (it
    is a diamond there), so the Atari key is named by its place. */
 static const char *const help_lines[] = {
@@ -92,7 +94,7 @@ static const char *const help_lines[] = {
 	"Arrows move, RETURN picks, Esc back",
 	"#Power off",
 	"F8 > Shut down, or the power button.",
-	"Never just unplug the laptop.",
+	"!Never cut power without shutting down",
 	NULL
 };
 
@@ -114,7 +116,8 @@ static const char *const gamepad_page[] = {
 
 static UI_tMenuItem items[MAX_LINES + 1];
 static char rows[24][LINE_MAX_W + 1]; /* the keyboard type block */
-static int n_items;
+static char inverse[4][LINE_MAX_W + 1]; /* '!' lines, bit 7 set */
+static int n_items, n_inverse;
 
 static void add_line(const char *text)
 {
@@ -123,9 +126,18 @@ static void add_line(const char *text)
 		return;
 	m = &items[n_items];
 	m->flags = UI_ITEM_ACTION;
-	m->retval = text[0] == '#' ? -1 : n_items; /* -1: a label, skipped */
+	m->retval = text[0] == '#' || text[0] == '!' ? -1 : n_items; /* -1: a label, skipped */
 	m->prefix = NULL;
-	m->item = (char *)(text[0] == '#' ? text + 1 : text);
+	if (text[0] == '!' && n_inverse < (int)(sizeof inverse / sizeof inverse[0])) {
+		char *out = inverse[n_inverse++];
+		size_t i;
+		for (i = 0; i < LINE_MAX_W && text[i + 1]; i++)
+			out[i] = (char)(text[i + 1] | 0x80);
+		out[i] = '\0';
+		m->item = out;
+	}
+	else
+		m->item = (char *)(text[0] == '#' || text[0] == '!' ? text + 1 : text);
 	m->suffix = NULL;
 	n_items++;
 }
@@ -156,6 +168,7 @@ static void build(void)
 {
 	size_t i;
 	n_items = 0;
+	n_inverse = 0;
 	for (i = 0; help_lines[i] != NULL; i++) {
 		if (strcmp(help_lines[i], "@KEYBOARD") == 0)
 			add_keyboard_block();

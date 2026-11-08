@@ -257,6 +257,21 @@ rm -rf "$BUILD/modloop"
 mkdir -p "$BUILD/modloop/modules" "$BUILD/modloop/firmware"
 cp -a "$STAGE/lib/modules/$KVER" "$BUILD/modloop/modules/"
 [ -d "$STAGE/lib/firmware" ] && cp -a "$STAGE/lib/firmware/." "$BUILD/modloop/firmware/"
+# Firmware old laptops never load (the stick is 1 GiB, keep the modloop small):
+# - Nvidia GSP blobs (RTX 20/30 and later; ~100 MB): nouveau only needs
+#   them on Turing+ GPUs, and such laptops drive their panel from the
+#   Intel GPU anyway
+# - Intel Wi-Fi ucode of older API versions (~50 MB): iwlwifi loads the
+#   newest file it finds for a chip, so only the newest per chip stays
+#   (the .pnvm files are kept as they are)
+rm -rf "$BUILD/modloop/firmware"/nvidia/*/gsp
+if [ -d "$BUILD/modloop/firmware/intel/iwlwifi" ]; then
+	ls "$BUILD/modloop/firmware/intel/iwlwifi" | sed -n 's/^\(iwlwifi-.*\)-\([0-9][0-9]*\)\.ucode\(\.zst\|\.xz\|\)$/\1 \2 &/p' \
+		| sort -k1,1 -k2,2n | awk '{ if ($1 == prev) print last; prev = $1; last = $3 }' \
+		| while read -r f; do rm -f "$BUILD/modloop/firmware/intel/iwlwifi/$f"; done
+fi
+find "$BUILD/modloop/firmware" -type l | while read -r l; do [ -e "$l" ] || rm -f "$l"; done  # dangling symlinks (busybox find has no -xtype)
+log "modloop firmware: $(du -sm "$BUILD/modloop/firmware" | cut -f1) MB"
 rm -f "$BUILD/modloop.sqfs"
 mksquashfs "$BUILD/modloop" "$BUILD/modloop.sqfs" -comp zstd -Xcompression-level 15 -all-root -no-progress -quiet
 ls -la "$BUILD/modloop.sqfs"

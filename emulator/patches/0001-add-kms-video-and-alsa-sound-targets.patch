@@ -425,3 +425,21 @@ index 5b651bcf..9c8be987 100644
  #if defined(_WIN32_WCE)
  			AboutPocketAtari();
  			break;
+diff --git a/src/ui_basic.c b/src/ui_basic.c
+index 1b36667c..13460105 100644
+--- a/src/ui_basic.c
++++ b/src/ui_basic.c
+@@ -150,6 +150,13 @@ static void Plot(int fg, int bg, int ch, int x, int y)
+ 	UBYTE *ptr = (UBYTE *) Screen_atari + 24 * Screen_WIDTH + 32 + y * (8 * Screen_WIDTH) + x * 8;
+ 	int i;
+ 	int j;
++#ifdef KMS
++	if (ch & 0x80) { /* atari-os-x86: bit 7 = inverse video, as on the Atari */
++		int t = fg;
++		fg = bg;
++		bg = t;
++	}
++#endif
+ 
+ 	for (i = 0; i < 8; i++) {
+ 		UBYTE data = *font_ptr++;

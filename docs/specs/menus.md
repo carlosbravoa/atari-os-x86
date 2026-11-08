@@ -7,7 +7,9 @@ guess … a switch for keyboard type"). Design: Claude (Fable); implementer:
 an Opus agent; QEMU and laptop verification: Claude. Rules as in
 `docs/specs/library.md` §3/§7 (patch regeneration, `-Werror`, nothing
 outside `emulator/`, `third_party/atari800` only through the patch, docs
-updated in the same change).
+updated in the same change). The patch now covers `configure.ac
+src/Makefile.am src/atari.c src/cfg.c src/sio.c src/ui.c src/ui_basic.c`
+(ui_basic.c: bit 7 of a character = inverse video in the menus).
 
 ## 0. Decisions (settled with Carlos)
 
