@@ -30,6 +30,7 @@
 #include "sound.h"
 #endif
 #include "kms/kms_hdev.h"
+#include "kms/kms_help.h"
 #include "kms/kms_input.h"
 #include "kms/kms_library.h"
 #include "kms/kms_sysmenu.h"
@@ -161,6 +162,17 @@ int main(int argc, char **argv)
 			Sound_Pause();
 #endif
 			KMS_SYSMENU_Run();
+#ifdef SOUND
+			Sound_Continue();
+#endif
+			INPUT_key_code = AKEY_NONE;
+		}
+		if (KMS_HELP_requested) {
+			KMS_HELP_requested = FALSE;
+#ifdef SOUND
+			Sound_Pause();
+#endif
+			KMS_HELP_Run();
 #ifdef SOUND
 			Sound_Continue();
 #endif

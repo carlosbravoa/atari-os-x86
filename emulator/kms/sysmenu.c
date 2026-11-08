@@ -41,6 +41,9 @@
 #include "ui.h"
 #include "util.h"
 #include "kms/kms_boot.h"
+#include "kms/kms_help.h"
+#include "kms/kms_input.h"
+#include "kms/kms_library.h"
 #include "kms/kms_sysmenu.h"
 #include "kms/kms_video.h"
 #include <sys/utsname.h>
@@ -52,6 +55,8 @@ int KMS_SYSMENU_requested = FALSE;
 int KMS_SYSMENU_volume = -1;
 int KMS_SYSMENU_brightness = -1;
 int KMS_SYSMENU_hint_done = FALSE;
+int KMS_SYSMENU_advanced_open = FALSE;
+int KMS_SYSMENU_reopen = FALSE;
 
 /* ---- talking to PID 1 ------------------------------------------------ */
 
@@ -245,7 +250,7 @@ void KMS_SYSMENU_ApplySettings(void)
 		backlight_set(KMS_SYSMENU_brightness);
 	if (!KMS_SYSMENU_hint_done && !hinted) {
 		hinted = TRUE;
-		KMS_VIDEO_SetHint("F8 = System menu    F1 = Emulator menu", 25.0);
+		KMS_VIDEO_SetHint("F1 = Help   F8 = System   F9 = Library", 25.0);
 	}
 	{
 		/* once, before the first cold start: what to boot when
@@ -256,6 +261,14 @@ void KMS_SYSMENU_ApplySettings(void)
 			asked = TRUE; /* init may not be listening yet: try again next time */
 			KMS_BOOT_SetTarget(boot_of(status, buf, sizeof buf));
 		}
+	}
+}
+
+void KMS_SYSMENU_HintSeen(void)
+{
+	if (!KMS_SYSMENU_hint_done) {
+		KMS_SYSMENU_hint_done = TRUE; /* they found the keys */
+		KMS_VIDEO_SetHint("", 0);
 	}
 }
 
@@ -739,9 +752,9 @@ static void display_changed(const char *what)
 	Log_print("sysmenu: display: %s", what);
 }
 
-/* "Display...": scaling, smoothing, scanlines, borders, TV look. Every
-   change is live and saved (KMS_* keys; the TV look is atari800's
-   ARTIFACT_NTSC). */
+/* "Display...": scaling, smoothing, scanlines, borders, TV look, TV
+   system, brightness. Every change is live and saved (KMS_* keys; the TV
+   look is atari800's ARTIFACT_NTSC, the TV system DEFAULT_TV_MODE). */
 static void display_menu(void)
 {
 	static const char *const scales[] = { "Integer (sharpest)", "Fit (4:3, larger)", "Fill (whole screen)" };
@@ -749,6 +762,7 @@ static void display_menu(void)
 	static const char *const borders[] = { "Full (384: all of it)", "TV (336, default)", "Tight (320)" };
 	static const char *const looks[] = { "Crisp", "NTSC TV" };
 	static char scale_item[40], smooth_item[40], scan_item[40], border_item[40], look_item[40];
+	static char tv_item[40], bri_item[40];
 	static const char *const border_labels[] = { "Full", "TV", "Tight" };
 	int option = 1;
 
@@ -759,11 +773,14 @@ static void display_menu(void)
 			UI_MENU_ACTION(3, scan_item),
 			UI_MENU_ACTION(4, border_item),
 			UI_MENU_ACTION(5, look_item),
+			UI_MENU_ACTION(7, tv_item),
+			UI_MENU_ACTION(8, bri_item),
 			UI_MENU_ACTION_ACCEL(6, "Back", "Esc"),
 			UI_MENU_END
 		};
 		int integer = KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER;
 		int pal = Atari800_tv_mode == Atari800_TV_PAL;
+		int bri = backlight_get();
 		int v;
 
 		snprintf(scale_item, sizeof scale_item, "Scaling: %s", KMS_VIDEO_ScaleLabel());
@@ -774,6 +791,11 @@ static void display_menu(void)
 		snprintf(border_item, sizeof border_item, "Borders: %s", border_labels[KMS_VIDEO_borders]);
 		snprintf(look_item, sizeof look_item, "TV look: %s%s", KMS_VIDEO_NtscLook() ? "NTSC TV" : "Crisp",
 		         pal ? " (PAL)" : "");
+		snprintf(tv_item, sizeof tv_item, "TV system: %s", pal ? "PAL" : "NTSC");
+		if (bri >= 0)
+			snprintf(bri_item, sizeof bri_item, "Brightness: %d%%", bri);
+		else
+			snprintf(bri_item, sizeof bri_item, "Brightness: not controllable");
 
 		option = UI_driver->fSelect("Display", 0, option, menu, NULL);
 		switch (option) {
@@ -819,10 +841,165 @@ static void display_menu(void)
 				Log_print("sysmenu: display: TV look %s", looks[v]);
 			}
 			break;
+		case 7:
+			tv_menu();
+			break;
+		case 8:
+			if (bri >= 0) {
+				v = UI_driver->fSelectSlider("Brightness", bri, 100, percent_label, NULL);
+				if (v >= 0) {
+					backlight_set(v);
+					KMS_SYSMENU_brightness = backlight_get();
+					CFG_WriteConfig();
+				}
+			}
+			break;
 		default:
 			return;
 		}
 	}
+}
+
+/* ---- controls ------------------------------------------------------------ */
+
+static void controls_changed(const char *what)
+{
+	CFG_WriteConfig();
+	Log_print("sysmenu: controls: %s", what);
+}
+
+/* "Controls...": arrows as cursor keys or joystick 0 (the F11 state),
+   keyboard type PC or Atari, which joystick gamepad 1 drives, and the
+   gamepad mapping. Live and saved (KMS_ARROWS_JOYSTICK, KMS_KEYBOARD,
+   KMS_PAD_SWAP). */
+static void controls_menu(void)
+{
+	static const char *const kbds[] = { "PC (keys type their caps)", "Atari (positional)" };
+	static char arrows_item[40], kbd_item[40], pad_item[40];
+	int option = 1;
+
+	for (;;) {
+		UI_tMenuItem menu[] = {
+			UI_MENU_ACTION_ACCEL(1, arrows_item, "F11"),
+			UI_MENU_ACTION(2, kbd_item),
+			UI_MENU_ACTION(3, pad_item),
+			UI_MENU_ACTION(4, "Gamepad buttons"),
+			UI_MENU_ACTION_ACCEL(5, "Back", "Esc"),
+			UI_MENU_END
+		};
+		int v;
+
+		snprintf(arrows_item, sizeof arrows_item, "Arrows: %s", KMS_INPUT_arrows_joystick ? "joystick 0" : "cursor keys");
+		snprintf(kbd_item, sizeof kbd_item, "Keyboard type: %s", KMS_INPUT_keyboard_pc ? "PC" : "Atari");
+		snprintf(pad_item, sizeof pad_item, "Gamepad 1 drives: joystick %d", KMS_INPUT_pad_swap ? 1 : 0);
+
+		option = UI_driver->fSelect("Controls", 0, option, menu, NULL);
+		switch (option) {
+		case 1:
+			KMS_INPUT_arrows_joystick = !KMS_INPUT_arrows_joystick;
+			controls_changed(KMS_INPUT_arrows_joystick ? "arrows joystick 0" : "arrows cursor keys");
+			break;
+		case 2:
+			v = choose("Keyboard type", kbds, 2, KMS_INPUT_keyboard_pc ? 0 : 1);
+			if (v >= 0 && v != (KMS_INPUT_keyboard_pc ? 0 : 1)) {
+				KMS_INPUT_keyboard_pc = v == 0;
+				controls_changed(KMS_INPUT_keyboard_pc ? "keyboard pc" : "keyboard atari");
+			}
+			break;
+		case 3:
+			KMS_INPUT_pad_swap = !KMS_INPUT_pad_swap;
+			controls_changed(KMS_INPUT_pad_swap ? "gamepads swapped" : "gamepads in order");
+			break;
+		case 4:
+			KMS_HELP_GamepadPage();
+			break;
+		default:
+			return;
+		}
+	}
+}
+
+/* ---- network ------------------------------------------------------------- */
+
+/* "Network...": Wi-Fi, the IP address, SSH on/off and its password. */
+static void network_menu(void)
+{
+	static char wifi_item[80], ip_item[64], ssh_item[48], pw_item[40];
+	int option = 1;
+
+	for (;;) {
+		char status[1024], buf[128], reply[1024];
+		UI_tMenuItem menu[] = {
+			UI_MENU_SUBMENU(1, wifi_item),
+			UI_MENU_LABEL(ip_item),
+			UI_MENU_ACTION(2, ssh_item),
+			UI_MENU_ACTION(3, pw_item),
+			UI_MENU_ACTION_ACCEL(4, "Back", "Esc"),
+			UI_MENU_END
+		};
+
+		if (!ctl_request("status", status, sizeof status))
+			Util_strlcpy(status, "", sizeof status);
+		snprintf(wifi_item, sizeof wifi_item, "Wi-Fi: %.30s", status_get(status, "wifi", buf, sizeof buf, "no adapter"));
+		snprintf(ip_item, sizeof ip_item, "IP: %.34s", status_get(status, "ip", buf, sizeof buf, "no network"));
+		snprintf(ssh_item, sizeof ssh_item, "Remote access (SSH): %s",
+		         strcmp(status_get(status, "ssh", buf, sizeof buf, "?"), "on") == 0 ? "on" : "off");
+		snprintf(pw_item, sizeof pw_item, "SSH password: %s",
+		         strcmp(status_get(status, "password", buf, sizeof buf, "none"), "set") == 0 ? "set" : "not set");
+
+		option = UI_driver->fSelect("Network", 0, option, menu, NULL);
+		switch (option) {
+		case 1:
+			wifi_menu();
+			break;
+		case 2: {
+			int on = strcmp(status_get(status, "ssh", buf, sizeof buf, "off"), "on") == 0;
+			if (ctl_request(on ? "ssh off" : "ssh on", reply, sizeof reply)) {
+				if (on)
+					UI_driver->fMessage("SSH stopped", TRUE);
+				else
+					UI_driver->fInfoScreen("Remote access",
+						"SSH is running as root.\0"
+						"Key: atari/ssh/id_ed25519 on the stick\0"
+						"\0"
+						"ssh -i <key> root@<ip shown in menu>\0"
+						"\n");
+			}
+			else
+				UI_driver->fMessage(reply[0] ? reply : "Not available", TRUE);
+			break;
+		}
+		case 3: {
+			char pw[64] = "";
+			if (UI_driver->fEditString("SSH password (empty = keys only)", pw, sizeof pw)) {
+				char cmd[96];
+				snprintf(cmd, sizeof cmd, "password %s", pw[0] ? pw : "clear");
+				if (ctl_request(cmd, reply, sizeof reply))
+					UI_driver->fMessage(pw[0] ? "Password set for root" : "Password cleared", TRUE);
+				else
+					UI_driver->fMessage(reply[0] ? reply : "Failed", TRUE);
+			}
+			break;
+		}
+		default:
+			return;
+		}
+	}
+}
+
+/* The Network line of the top level: the Wi-Fi network when connected,
+   else the address (Ethernet), else the Wi-Fi state. */
+static void network_label(const char *status, char *out, size_t size)
+{
+	char wifi[96], ip[64];
+	status_get(status, "wifi", wifi, sizeof wifi, "no adapter");
+	status_get(status, "ip", ip, sizeof ip, "");
+	if (strncmp(wifi, "connected ", 10) == 0)
+		snprintf(out, size, "Network: %.28s", wifi + 10);
+	else if (ip[0])
+		snprintf(out, size, "Network: %.28s", ip);
+	else
+		snprintf(out, size, "Network: %.28s", wifi);
 }
 
 /* ---- install onto the laptop's disk ------------------------------------ */
@@ -987,39 +1164,44 @@ static int install_menu(void)
 
 /* ---- the menu --------------------------------------------------------- */
 
+/* Back in the System menu after a menu of its own closed (they leave
+   UI_is_active FALSE). */
+static void ui_back(void)
+{
+	UI_is_active = TRUE;
+	UI_driver->fInit();
+}
+
 void KMS_SYSMENU_Run(void)
 {
-	static char fuji_item[48], vol_item[32], bri_item[32], wifi_item[80], ssh_item[48], pw_item[40], info_item[80];
-	static char boot_item[48], tv_item[40], eject_item[48];
+	static char boot_item[48], eject_item[48], vol_item[32], net_item[48], reboot_item[48];
 	int option = 1;
 	int done = FALSE;
 
 	UI_is_active = TRUE;
 	UI_driver->fInit();
+	KMS_SYSMENU_HintSeen();
 
 	while (!done) {
 		char status[1024], buf[128], reply[1024];
-		int have_ctl, vol, bri;
+		int have_ctl, vol;
 		UI_tMenuItem menu[] = {
-			UI_MENU_ACTION(1, fuji_item),
-			UI_MENU_ACTION(2, vol_item),
-			UI_MENU_ACTION(3, bri_item),
-			UI_MENU_ACTION(14, tv_item),
-			UI_MENU_SUBMENU(16, "Display..."),
-			UI_MENU_SUBMENU(4, wifi_item),
-			UI_MENU_ACTION(5, ssh_item),
-			UI_MENU_ACTION(11, pw_item),
-			UI_MENU_LABEL(info_item),
-			UI_MENU_ACTION(12, "Hardware status"),
-			UI_MENU_LABEL(""),
-			UI_MENU_ACTION(17, eject_item),
-			UI_MENU_ACTION(13, boot_item),
-			UI_MENU_ACTION(6, "Save logs to the stick"),
-			UI_MENU_ACTION(15, "Install onto this laptop's disk..."),
-			UI_MENU_ACTION(7, "Restart emulator"),
-			UI_MENU_ACTION(8, "Reboot laptop"),
-			UI_MENU_ACTION(9, "Shut down"),
-			UI_MENU_ACTION_ACCEL(10, "Back to Atari", "Esc"),
+			UI_MENU_ACTION_ACCEL(1, "Library", "F9"),
+			UI_MENU_ACTION(2, boot_item),
+			UI_MENU_ACTION(3, eject_item),
+			UI_MENU_SUBMENU(4, "Display..."),
+			UI_MENU_ACTION(5, vol_item),
+			UI_MENU_SUBMENU(6, "Controls..."),
+			UI_MENU_SUBMENU(7, net_item),
+			UI_MENU_ACTION(8, "Help: keys and menus"),
+			UI_MENU_ACTION(9, "Hardware status"),
+			UI_MENU_ACTION(10, "Install onto this laptop's disk..."),
+			UI_MENU_ACTION(11, "Save logs to the stick"),
+			UI_MENU_ACTION(12, "Restart emulator"),
+			UI_MENU_ACTION(13, reboot_item),
+			UI_MENU_ACTION(14, "Shut down"),
+			UI_MENU_SUBMENU(15, "Advanced: emulator menu..."),
+			UI_MENU_ACTION_ACCEL(16, "Back to Atari", "Esc"),
 			UI_MENU_END
 		};
 		int efi, i;
@@ -1036,143 +1218,115 @@ void KMS_SYSMENU_Run(void)
 			status_get(status, "installable", inst, sizeof inst, "0");
 			show = (strcmp(media, "stick") == 0 || strcmp(media, "image-file") == 0) && atoi(inst) > 0;
 			for (i = 0; menu[i].flags != UI_ITEM_END; i++)
-				if (menu[i].retval == 15 && !show)
+				if (menu[i].retval == 10 && !show)
 					menu[i].flags = UI_ITEM_HIDDEN;
 		}
 
-		snprintf(fuji_item, sizeof fuji_item, "Boot into: %s", boot_label(boot_of(status, buf, sizeof buf)));
+		snprintf(boot_item, sizeof boot_item, "Boot into: %s", boot_label(boot_of(status, buf, sizeof buf)));
 		snprintf(eject_item, sizeof eject_item, "Eject all, back to %s", boot_label(KMS_BOOT_Target()));
 		vol = ALSA_GetVolume();
 		if (vol >= 0)
-			snprintf(vol_item, sizeof vol_item, "Volume: %d%%", vol);
+			snprintf(vol_item, sizeof vol_item, "Sound: %d%%", vol);
 		else
-			snprintf(vol_item, sizeof vol_item, "Volume: no sound card");
-		bri = backlight_get();
-		if (bri >= 0)
-			snprintf(bri_item, sizeof bri_item, "Brightness: %d%%", bri);
-		else
-			snprintf(bri_item, sizeof bri_item, "Brightness: not controllable");
-		snprintf(tv_item, sizeof tv_item, "TV system: %s", Atari800_tv_mode == Atari800_TV_PAL ? "PAL" : "NTSC");
-		snprintf(wifi_item, sizeof wifi_item, "Wi-Fi: %s", status_get(status, "wifi", buf, sizeof buf, "no adapter"));
-		snprintf(ssh_item, sizeof ssh_item, "Remote access (SSH): %s",
-		         strcmp(status_get(status, "ssh", buf, sizeof buf, "?"), "on") == 0 ? "on" : "off");
-		snprintf(pw_item, sizeof pw_item, "SSH password: %s",
-		         strcmp(status_get(status, "password", buf, sizeof buf, "none"), "set") == 0 ? "set" : "not set");
+			snprintf(vol_item, sizeof vol_item, "Sound: no sound card");
+		network_label(status, net_item, sizeof net_item);
 		efi = strcmp(status_get(status, "efi", buf, sizeof buf, "no"), "yes") == 0;
-		snprintf(boot_item, sizeof boot_item, efi ? "Reboot straight back into Atari" : "Reboot (no UEFI boot control here)");
-		if (!KMS_SYSMENU_hint_done) {
-			KMS_SYSMENU_hint_done = TRUE; /* they found the key */
-			KMS_VIDEO_SetHint("", 0);
-		}
-		{
-			char ip[64], bat[16];
-			status_get(status, "ip", ip, sizeof ip, "no network");
-			status_get(status, "battery", bat, sizeof bat, "");
-			if (bat[0])
-				snprintf(info_item, sizeof info_item, "IP %.40s   Battery %.8s%%", ip, bat);
-			else
-				snprintf(info_item, sizeof info_item, "IP %s", ip);
-		}
+		/* on UEFI a popup asks: straight back here (BootNext) or normal */
+		Util_strlcpy(reboot_item, efi ? "Reboot laptop..." : "Reboot laptop", sizeof reboot_item);
 
 		option = UI_driver->fSelect("System", 0, option, menu, NULL);
 		switch (option) {
 		case 1:
+			if (KMS_LIBRARY_Run())
+				done = TRUE; /* a program was started */
+			else
+				ui_back();
+			break;
+		case 2:
 			if (boot_menu(boot_of(status, buf, sizeof buf)))
 				done = TRUE;
 			break;
-		case 2:
-			if (vol >= 0) {
-				int v = UI_driver->fSelectSlider("Volume", vol, 100, percent_label, NULL);
-				if (v >= 0) {
-					ALSA_SetVolume(v);
-					KMS_SYSMENU_volume = v;
-				}
-			}
-			break;
 		case 3:
-			if (bri >= 0) {
-				int v = UI_driver->fSelectSlider("Brightness", bri, 100, percent_label, NULL);
-				if (v >= 0) {
-					backlight_set(v);
-					KMS_SYSMENU_brightness = backlight_get();
-				}
-			}
-			break;
-		case 4:
-			wifi_menu();
-			break;
-		case 14:
-			tv_menu();
-			break;
-		case 16:
-			display_menu();
-			break;
-		case 17:
 			KMS_BOOT_EjectAll();
 			done = TRUE;
 			break;
-		case 5: {
-			int on = strcmp(status_get(status, "ssh", buf, sizeof buf, "off"), "on") == 0;
-			if (ctl_request(on ? "ssh off" : "ssh on", reply, sizeof reply)) {
-				if (on)
-					UI_driver->fMessage("SSH stopped", TRUE);
-				else
-					UI_driver->fInfoScreen("Remote access",
-						"SSH is running as root.\0"
-						"Key: atari/ssh/id_ed25519 on the stick\0"
-						"\0"
-						"ssh -i <key> root@<ip shown in menu>\0"
-						"\n");
-			}
-			else
-				UI_driver->fMessage(reply[0] ? reply : "Not available", TRUE);
+		case 4:
+			display_menu();
 			break;
-		}
+		case 5:
+			if (vol >= 0) {
+				int v = UI_driver->fSelectSlider("Sound volume", vol, 100, percent_label, NULL);
+				if (v >= 0) {
+					ALSA_SetVolume(v);
+					KMS_SYSMENU_volume = v;
+					CFG_WriteConfig();
+				}
+			}
+			break;
 		case 6:
-			ctl_request("logs", reply, sizeof reply);
-			UI_driver->fMessage("Logs written to atari/logs", TRUE);
+			controls_menu();
 			break;
-		case 11: {
-			char pw[64] = "";
-			if (UI_driver->fEditString("SSH password (empty = keys only)", pw, sizeof pw)) {
-				char cmd[96];
-				snprintf(cmd, sizeof cmd, "password %s", pw[0] ? pw : "clear");
-				if (ctl_request(cmd, reply, sizeof reply))
-					UI_driver->fMessage(pw[0] ? "Password set for root" : "Password cleared", TRUE);
-				else
-					UI_driver->fMessage(reply[0] ? reply : "Failed", TRUE);
-			}
+		case 7:
+			network_menu();
 			break;
-		}
-		case 12:
+		case 8:
+			KMS_HELP_Run();
+			break;
+		case 9:
 			hardware_page(status);
 			break;
-		case 15:
+		case 10:
 			if (install_menu())
 				done = TRUE;
 			break;
+		case 11:
+			ctl_request("logs", reply, sizeof reply);
+			UI_driver->fMessage("Logs written to atari/logs", TRUE);
+			break;
+		case 12:
+			ctl_request("restart-emulator", reply, sizeof reply);
+			done = TRUE;
+			break;
 		case 13:
-			if (efi && !ctl_request("bootnext", reply, sizeof reply)) {
-				UI_driver->fMessage(reply[0] ? reply : "Could not set BootNext", TRUE);
-				break;
+			if (efi) {
+				/* BootNext is a one-shot request for the next start only;
+				   a normal reboot follows the machine's own boot order
+				   (the other OS on a dual-boot laptop). */
+				static const char *const hows[] = { "Straight back into Atari", "Normal reboot (boot order, other OS)" };
+				int how = choose("Reboot", hows, 2, 0);
+				if (how < 0)
+					break;
+				if (how == 0 && !ctl_request("bootnext", reply, sizeof reply)) {
+					UI_driver->fMessage(reply[0] ? reply : "Could not set BootNext", TRUE);
+					break;
+				}
 			}
 			ctl_request("reboot", reply, sizeof reply);
 			done = TRUE;
 			break;
-
-		case 7:
-			ctl_request("restart-emulator", reply, sizeof reply);
-			done = TRUE;
-			break;
-		case 8:
-			ctl_request("reboot", reply, sizeof reply);
-			done = TRUE;
-			break;
-		case 9:
+		case 14:
 			ctl_request("poweroff", reply, sizeof reply);
 			done = TRUE;
 			break;
-		case 10:
+		case 15:
+			if (KMS_SYSMENU_advanced_open) {
+				done = TRUE; /* opened from that menu: back to it */
+				break;
+			}
+			/* atari800's own menu (save states, machine type, cartridge
+			   types, ...); its "System menu" entry comes back here,
+			   anything else (Esc, a reset, a program) to the Atari */
+			KMS_SYSMENU_advanced_open = TRUE;
+			KMS_SYSMENU_reopen = FALSE;
+			UI_Run();
+			KMS_SYSMENU_advanced_open = FALSE;
+			if (KMS_SYSMENU_reopen)
+				ui_back();
+			else
+				done = TRUE;
+			KMS_SYSMENU_reopen = FALSE;
+			break;
+		case 16:
 		case -1:
 		case -2:
 			done = TRUE;
@@ -1193,4 +1347,5 @@ void KMS_SYSMENU_Run(void)
 	}
 	UI_alt_function = -1;
 	KMS_SYSMENU_requested = FALSE;
+	KMS_HELP_requested = FALSE;
 }

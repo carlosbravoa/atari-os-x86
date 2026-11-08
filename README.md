@@ -206,7 +206,7 @@ OS is used.
 
 ## The Library (F9)
 
-F9 (or the first entry of the F1 menu) opens a browser over the sources,
+F9 (or the first entry of the F8 menu) opens a browser over the sources,
 cycled with **Tab**: **Stick** (the stick's whole `atari/` folder, opening
 in `library/`: FujiNet's downloads are `Stick: /fujinet/SD`, and `disks/`,
 `hdd/`, `ash/` are there too; `config/`, `ssh/` and `logs/` are not shown)
@@ -215,10 +215,18 @@ and every USB drive plugged in (init mounts them under
 folder enters it, Backspace or `..` goes back up, Esc closes (from
 `library/` or a source's root). RETURN on a file offers **Run**, **Run
 with BASIC** (disk images: for BASIC-based disks such as magazine disks),
-**Mount as D1:** (or insert the cartridge/tape; the next cold start boots
-it), **Copy to Library**, **Copy to FujiNet SD**, **Copy to...** a USB
-drive (keeping the folder path; "Safe to unplug" once it is synced),
-**Favourite**, and **Eject all & reboot** when something is mounted.
+**Mount as D1:** to **D4:** (disk images, without a restart: swap disk 2
+in mid-game; what is in D1: boots at the next cold start), or **Insert
+cartridge**/**Insert tape** (the next cold start boots it), **Copy to
+Library**, **Copy to FujiNet SD**, **Copy to...** a USB drive (keeping
+the folder path; "Safe to unplug" once it is synced), **Favourite**, and
+**Eject all & reboot** when something is mounted.
+Under Source and Filter, every listing has a **Drives** line,
+`[ Drives: D1 Game (Disk 1).atr  D2 Game (Disk 2).atr ]` (or `nothing
+mounted`); RETURN on it lists D1:-D4:, the cartridge and the tape: RETURN
+on one in use ejects it after a Yes (a disk without a restart; the
+cartridge with one, as its program loses its ROM), and **Eject all &
+reboot** goes back to the boot target.
 `Stick: /` and `Stick: /library` list the last 8 programs run and the
 favourites (`atari/config/library.cfg`). Multi-disk sets named
 `... (Disk 1)...`, `..._d1...` or `... Side 1...` get disks 2-4 in D2:-D4:.
@@ -226,13 +234,35 @@ A filter entry narrows the listing to matching file names.
 
 ## The System menu (F8)
 
-The laptop boots straight to BASIC `READY`. F8 opens a menu in the same
-style as the emulator's own, backed by PID 1 over a Unix socket:
+The laptop boots straight to BASIC `READY`. F8 (or a gamepad's Guide
+button) opens a menu in the same style as the emulator's own, backed by
+PID 1 over a Unix socket. Every setting lives in one place:
 
+```
+Library                         F9
+Boot into: BASIC
+Eject all, back to BASIC
+Display...      Scaling, Smoothing, Scanlines, Borders, TV look,
+                TV system, Brightness
+Sound: 80%
+Controls...     Arrows, Keyboard type, Gamepad 1 drives, Gamepad buttons
+Network: <ssid>  Wi-Fi, IP, Remote access (SSH), SSH password
+Help: keys and menus
+Hardware status
+Install onto this laptop's disk...   (stick + internal disk only)
+Save logs to the stick
+Restart emulator
+Reboot laptop   (UEFI: straight back into Atari, or normal)
+Shut down
+Advanced: emulator menu...
+Back to Atari                   Esc
+```
+
+- **Library**: the F9 Library
 - **Boot into**: BASIC, No BASIC (the XL self test, as when holding
   OPTION), ASH (the Atari shell) or FujiNet CONFIG; choosing another one
   restarts the Atari into it (persists). This is what starts when nothing
-  is mounted: **what is in D1: boots**. Every cold start (F1 "Reboot",
+  is mounted: **what is in D1: boots**. Every cold start (Advanced "Reboot",
   Shift+F5, the Library, ASH's `reboot`, F8) boots a disk in D1:, a
   program, a cartridge or a tape set to boot when there is one, with the
   ASH cartridge taken out and BASIC off for that boot (`Run with BASIC`
@@ -248,15 +278,27 @@ style as the emulator's own, backed by PID 1 over a Unix socket:
   Medium, Strong (every second panel row of an Atari line at 75/50/25 %,
   from a 2x high picture up); **Borders** Full (384 columns), TV (336,
   default), Tight (320); **TV look** Crisp or NTSC TV (atari800's NTSC
-  composite filter, NTSC only; the same setting as F1 > Display Settings >
-  "full NTSC filter", `ARTIFACT_NTSC=NTSC-FULL`). Live and saved
+  composite filter, NTSC only; the same setting as Advanced > Display
+  Settings > "full NTSC filter", `ARTIFACT_NTSC=NTSC-FULL`); **TV system**
+  and **Brightness** (below). Live and saved
   (`KMS_SCALE`, `KMS_SMOOTH`, `KMS_SCANLINES`, `KMS_BORDERS` in
   `atari800.cfg`); `-kms-debug` logs the render time per frame
-- **Volume** and **Brightness** sliders (persist in the emulator config)
-- **Wi-Fi**: scan, pick a network, type the password; `wpa_supplicant`
-  keeps the network in `atari/config/wpa_supplicant.conf`
-- **Remote access (SSH)** on/off, **SSH password** (keys only until set)
-- **TV system**: NTSC (60 Hz, the default: the Atari was an NTSC machine
+- **Sound** (volume) and Display's **Brightness**: sliders, saved in the
+  emulator config (`KMS_VOLUME`, `KMS_BRIGHTNESS`)
+- **Controls...**: **Arrows** cursor keys or joystick 0 (the same switch
+  as F11); **Keyboard type** PC (default: every key types what its cap
+  says) or Atari (positional: the PC key in the place of an Atari key
+  types that key, so Shift+2 is `"`, Shift+8 `@`, `-` is `<`, `=` `>`,
+  `[` `-`, `]` `=`, `'` `+`, `\` `*`; the Help page shows the table);
+  **Gamepad 1 drives** joystick 0 or 1 (swaps the first two gamepads;
+  menus follow the first); **Gamepad buttons** (the mapping). Live and
+  saved (`KMS_ARROWS_JOYSTICK`, `KMS_KEYBOARD=pc|atari`, `KMS_PAD_SWAP`)
+- **Network...**: **Wi-Fi** (scan, pick a network, type the password;
+  `wpa_supplicant` keeps the network in
+  `atari/config/wpa_supplicant.conf`), the IP address, **Remote access
+  (SSH)** on/off, **SSH password** (keys only until set)
+- **Help: keys and menus**: the F1 page
+- **TV system** (in Display): NTSC (60 Hz, the default: the Atari was an NTSC machine
   first) or PAL (50 Hz, one keypress away here), switched live and saved
   in the emulator config (`DEFAULT_TV_MODE`; a config that already says
   PAL stays PAL). When the panel's refresh is within
@@ -272,16 +314,32 @@ style as the emulator's own, backed by PID 1 over a Unix socket:
   options, TV system and pacing, sound card, Wi-Fi, IP, battery, boot
   medium, boot target, what the last cold start booted (and whether BASIC
   was on), kernel
-- **Reboot straight back into Atari** (UEFI `BootNext`, a one-shot request
-  for the next start only; the machine's boot order is not touched)
 - **Install onto this laptop's disk...** (only when running from a stick
   and an internal disk is there; see "Install onto the laptop's disk")
-- Save logs to the stick, restart emulator, reboot, **shut down** (besides
-  the power button, the only way to power off: F9 no longer quits)
+- Save logs to the stick, restart emulator
+- **Reboot laptop**; on UEFI machines a popup asks **Straight back into
+  Atari** (`BootNext`, a one-shot request for the next start only; the
+  machine's boot order is not touched) or **Normal reboot** (the machine's
+  own boot order: the other OS on a dual-boot laptop)
+- **Shut down** (besides the power button, the only way to power off: F9
+  no longer quits)
+- **Advanced: emulator menu...**: atari800's own menu, with everything it
+  has (save states, machine type, cartridge types, disk and tape
+  management, recording). Its "System menu" entry comes back here, Esc
+  goes back to the Atari; it also has "Library" and "Shut down the
+  laptop"
 
 Boot shows an Atari-style splash with progress lines; the first boots show
-an "F8 = System menu" hint under the picture until the menu is opened once.
-The emulator's own F1 menu has "System" and "Shut down" entries.
+a "F1 = Help   F8 = System   F9 = Library" hint under the picture until
+one of the three is opened.
+
+### Help (F1)
+
+F1 shows every key on one page (any key turns to the next, Esc closes):
+the function keys, the Atari keys on the PC keyboard, the joystick keys,
+the current keyboard type, the gamepad; a second page has the Library and
+menu keys and how to power off; with the Atari keyboard type a third page
+has the positional table. The same pages are F8 > "Help: keys and menus".
 
 ### Remote access
 
@@ -365,19 +423,26 @@ restarting itself.
 
 | Key | Atari |
 |---|---|
-| F1 | menu |
+| F1 | Help: every key (the stock atari800 menu is F8 > Advanced) |
 | F2 / F3 / F4 | OPTION / SELECT / START |
 | F5, Shift+F5 | warm / cold reset |
 | F6, F7 | HELP, BREAK |
-| F8 | System menu (FujiNet, volume, brightness, Wi-Fi, SSH, power) |
-| F9 | Library: browse, run and copy Atari files (the stick, FujiNet SD on it, USB drives) |
-| F10 | screenshot (PCX, saved next to the config) |
+| F8 | System menu (Library, boot target, display, sound, controls, network, power) |
+| F9 | Library: browse, run, mount and copy Atari files (the stick, FujiNet SD on it, USB drives) |
+| F10, Shift+F10 | screenshot, interlaced screenshot (PCX, saved next to the config) |
 | F11 | toggle arrow keys between cursor keys (default) and joystick 0 |
-| Arrows + left Alt | joystick 0 after F11 (numpad 8/2/4/6 + 0 always) |
+| F12 | turbo on/off |
 | ` or Win | Atari (inverse video) key |
+| Home, Ins, Del | CLEAR, insert, delete (Shift: line) |
+| Caps Lock | CAPS |
+| Shift+arrow | cursor keys too (no longer `- = + *`) |
+| Arrows + left Alt | joystick 0 after F11 (numpad 8/2/4/6 + 0 always) |
 
-USB gamepads work out of the box; Start/Select/X map to the console keys and
-the guide button opens the menu.
+With the default keyboard type (PC) every key types what its cap says;
+F8 > Controls switches to the Atari's own layout (positional, see the
+System menu). USB gamepads work out of the box: D-pad/left stick =
+joystick, A/triggers = fire, Start/Select/X = START/SELECT/OPTION, B = Esc
+in menus, Guide = System menu.
 
 ## Building
 
@@ -449,6 +514,10 @@ or turn a release image into one with `qemu-test.sh debug-image <img>`
 `type "<text>"` types a string, one `sendkey` per character on a US layout
 (`\n` is RETURN; `QEMU_TYPE_DELAY`, default 0.15 s, between keys), which is
 how ASH is driven headless, e.g. `scripts/qemu-test.sh type 'ls sd:/\n'`.
+Menu positions for `key` recipes: F8 then `down` 12 times and `ret` is
+**Shut down** (13 times when "Install onto this laptop's disk..." is
+shown, i.e. with an internal disk attached), 13 times is "Advanced:
+emulator menu...", whose "System menu" entry is 19 `down`s from its top.
 `QEMU_EXTRA` adds QEMU arguments; `scripts/mk-usb-test.sh` builds
 `build/usb-test.img`, a USB drive with Atari files for the Library:
 

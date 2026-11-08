@@ -564,8 +564,9 @@ Done. Next:
      (usually F12; F9 on HP, Esc or F8 on ASUS, F11 on MSI, the Option key
      on Intel Macs). Secure Boot must be off on UEFI machines.
   2. Pick the USB stick. The Atari comes up at READY.
-  3. F8 = System menu (Wi-Fi, boot into BASIC/ASH/FujiNet, shut down),
-     F9 = Library. Your files go in the stick's atari/ folder.
+  3. F1 = Help (every key), F8 = System menu (Wi-Fi, boot into
+     BASIC/ASH/FujiNet, shut down), F9 = Library. Your files go in the
+     stick's atari/ folder.
 
 Ventoy users: no need for this script, copy the .img (after unxz) to the
 Ventoy stick instead.

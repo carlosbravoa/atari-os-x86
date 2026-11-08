@@ -93,7 +93,7 @@ index 61d89b4a..40e5d82c 100644
  AM_CONDITIONAL([WITH_SOUND_SDL2], test "$with_sound" = sdl2)
  AM_CONDITIONAL([WITH_SOUND_DOSSB], test "$with_sound" = dossb)
 diff --git a/src/Makefile.am b/src/Makefile.am
-index a1491602..84320777 100644
+index a1491602..5eb2310d 100644
 --- a/src/Makefile.am
 +++ b/src/Makefile.am
 @@ -124,6 +124,9 @@ endif
@@ -106,7 +106,7 @@ index a1491602..84320777 100644
  if WITH_SOUND_LIBATARI800
  atari800_SOURCES += sound.c libatari800/sound.c libatari800/sound.h
  endif
-@@ -212,6 +215,18 @@ atari800_SOURCES += \
+@@ -212,6 +215,19 @@ atari800_SOURCES += \
  atari800_SOURCES += pbi_proto80.c pbi_proto80.h af80.c af80.h bit3.c bit3.h
  endif
  
@@ -119,7 +119,8 @@ index a1491602..84320777 100644
 +	kms/library.c kms/kms_library.h \
 +	kms/zipfile.c kms/kms_zipfile.h \
 +	kms/hdev.c kms/kms_hdev.h \
-+	kms/boot.c kms/kms_boot.h
++	kms/boot.c kms/kms_boot.h \
++	kms/help.c kms/kms_help.h
 +endif
 +
  if WITH_VIDEO_DOSVGA
@@ -339,7 +340,7 @@ index 9a5b7104..53e3edb0 100644
  #endif /* NETSIO */
  
 diff --git a/src/ui.c b/src/ui.c
-index 5b651bcf..3366bb37 100644
+index 5b651bcf..9c8be987 100644
 --- a/src/ui.c
 +++ b/src/ui.c
 @@ -65,6 +65,11 @@
@@ -370,7 +371,7 @@ index 5b651bcf..3366bb37 100644
  		UI_MENU_ACTION(UI_MENU_MONITOR, "About AtariDC"),
 +#else
 +#ifdef KMS
-+		UI_MENU_ACTION_ACCEL(UI_MENU_MONITOR, "System: FujiNet, Wi-Fi, sound, power", "F8"),
++		UI_MENU_ACTION_ACCEL(UI_MENU_MONITOR, "System menu", "F8"),
  #else
  		UI_MENU_ACTION_ACCEL(UI_MENU_MONITOR, "Enter Monitor", "F8"),
 +#endif
@@ -406,11 +407,17 @@ index 5b651bcf..3366bb37 100644
  		case UI_MENU_RUN:
  			/* if (RunExe()) */
  			if (AutostartFile())
-@@ -4629,6 +4656,11 @@ void UI_Run(void)
+@@ -4629,6 +4656,17 @@ void UI_Run(void)
  			AboutEmulator();
  			break;
  		case UI_MENU_MONITOR:
 +#ifdef KMS
++			if (KMS_SYSMENU_advanced_open) {
++				/* opened from F8 > Advanced: back to that System menu */
++				KMS_SYSMENU_reopen = TRUE;
++				done = TRUE;
++				break;
++			}
 +			KMS_SYSMENU_Run();
 +			UI_is_active = TRUE; /* back in this menu */
 +			break;

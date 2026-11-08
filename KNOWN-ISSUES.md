@@ -13,6 +13,13 @@
   with the SSID and password length, never the password). Workaround for
   passwords the menu cannot type: add the network to
   `atari/config/wpa_supplicant.conf` on the stick by hand.
+- **Keyboard**: in the PC keyboard type (the default) `{ } ~` cannot be
+  typed (the Atari has no such keys; Shift+`[` `]` give `[ ]`, and
+  backtick is the Atari/inverse key). The Atari keyboard type (F8 >
+  Controls) is positional for the symbol keys only, after a US layout.
+  The Alt+letter shortcuts shown in atari800's own menu (F8 > Advanced)
+  are not bound, and never were. The Help page names the Atari key "Win /
+  key left of 1": the Atari font has no backtick to print.
 - **Old i3 (Broadwell) laptop**: blurry picture (firmware framebuffer, i915
   probably not taking over) and a firmware "self test" screen after one
   boot. No logs captured yet.

@@ -8,12 +8,19 @@
  * grabbed so a VT underneath never sees the keys. Devices are classified
  * from their capability bits and hot-plugged through inotify.
  *
- * Key layout (positional, US-style keycaps):
- *   F1 menu   F2 OPTION  F3 SELECT  F4 START   F5 reset (Shift: cold)
+ * Key layout (US-style keycaps; the F1 Help page lists it too, kms/help.c):
+ *   F1 Help   F2 OPTION  F3 SELECT  F4 START   F5 reset (Shift: cold)
  *   F6 HELP   F7 BREAK   F8 System menu  F9 Library  F10 screenshot
- *   F11 arrows=joystick toggle
- *   F12 turbo `/Win = Atari (inverse)  Home = CLEAR  Ins/Del = insert/delete
+ *   F11 arrows=joystick toggle  F12 turbo
+ *   `/Win = Atari (inverse)  Home = CLEAR  Ins/Del = insert/delete
+ *   Shift+arrows = cursor keys too (no longer - = + *)
  *   Arrows + left Alt = joystick 0 (after F11), numpad 8/2/4/6 + 0 always.
+ *   Gamepad: Guide = System menu, B = Esc in menus.
+ * Keyboard type (F8 > Controls, KMS_KEYBOARD=pc|atari): PC (default)
+ * types what the PC key cap says; Atari is positional: the PC key sends
+ * the Atari key in the same place (Shift+2 = ", - = <, [ = -, ' = +),
+ * see pos_map[]. Letters, digits, arrows and function keys are the same
+ * in both.
  *
  * This file is part of the Atari800 emulator project which emulates
  * the Atari 400, 800, 800XL, 130XE, and 5200 8-bit computers.
@@ -46,11 +53,15 @@
 #include "platform.h"
 #include "ui.h"
 #include "util.h"
+#include "kms/kms_help.h"
 #include "kms/kms_input.h"
 #include "kms/kms_library.h"
 #include "kms/kms_sysmenu.h"
 
 int KMS_INPUT_arrows_joystick = FALSE; /* F11 toggles; FujiNet CONFIG and BASIC need cursor keys */
+int KMS_INPUT_keyboard_pc = TRUE;      /* FALSE: Atari (positional) keyboard type */
+int KMS_INPUT_pad_swap = FALSE;        /* gamepad 1 drives joystick 1 and gamepad 2 joystick 0 */
+static int last_code = AKEY_NONE;      /* last key code returned, for KMS_INPUT_LastKey() */
 static int debug_keys = FALSE; /* -evdev-debug: log every key event */
 
 #define INPUT_DIR "/dev/input"
@@ -393,7 +404,50 @@ struct keymap {
 	int shifted; /* -1: same as plain with AKEY_SHFT */
 };
 
-/* Letters are handled generically (AKEY_SHFT / AKEY_CTRL bits). */
+/* Keyboard type Atari (positional): the PC key in the place of an Atari
+   key sends that key, with Shift as pressed, so the Atari's key caps
+   apply. The labels are what the Help page prints (kms/help.c reads them
+   through KMS_INPUT_PositionalKey), so the table and the page agree.
+   Keys not listed here type as in PC mode. */
+static const struct {
+	uint16_t key;
+	int akey; /* shifted: akey | AKEY_SHFT */
+	const char *pc, *plain, *shifted;
+} pos_map[] = {
+	{ KEY_1, AKEY_1, "1", "1", "!" },
+	{ KEY_2, AKEY_2, "2", "2", "\"" },
+	{ KEY_3, AKEY_3, "3", "3", "#" },
+	{ KEY_4, AKEY_4, "4", "4", "$" },
+	{ KEY_5, AKEY_5, "5", "5", "%" },
+	{ KEY_6, AKEY_6, "6", "6", "&" },
+	{ KEY_7, AKEY_7, "7", "7", "'" },
+	{ KEY_8, AKEY_8, "8", "8", "@" },
+	{ KEY_9, AKEY_9, "9", "9", "(" },
+	{ KEY_0, AKEY_0, "0", "0", ")" },
+	{ KEY_MINUS, AKEY_LESS, "-", "<", "CLEAR" },
+	{ KEY_EQUAL, AKEY_GREATER, "=", ">", "INSERT" },
+	{ KEY_LEFTBRACE, AKEY_MINUS, "[", "-", "_" },
+	{ KEY_RIGHTBRACE, AKEY_EQUAL, "]", "=", "|" },
+	{ KEY_SEMICOLON, AKEY_SEMICOLON, ";", ";", ":" },
+	{ KEY_APOSTROPHE, AKEY_PLUS, "'", "+", "\\" },
+	{ KEY_BACKSLASH, AKEY_ASTERISK, "\\", "*", "^" },
+	{ KEY_COMMA, AKEY_COMMA, ",", ",", "[" },
+	{ KEY_DOT, AKEY_FULLSTOP, ".", ".", "]" },
+	{ KEY_SLASH, AKEY_SLASH, "/", "/", "?" }
+};
+
+int KMS_INPUT_PositionalKey(int i, const char **pc, const char **plain, const char **shifted)
+{
+	if (i < 0 || i >= (int)(sizeof pos_map / sizeof pos_map[0]))
+		return FALSE;
+	*pc = pos_map[i].pc;
+	*plain = pos_map[i].plain;
+	*shifted = pos_map[i].shifted;
+	return TRUE;
+}
+
+/* Keyboard type PC: what the key cap says. Letters are handled
+   generically (AKEY_SHFT / AKEY_CTRL bits). */
 static const struct keymap symbol_map[] = {
 	{ KEY_1, AKEY_1, AKEY_EXCLAMATION },
 	{ KEY_2, AKEY_2, AKEY_AT },
@@ -472,18 +526,29 @@ static int translate(int key, int shift, int ctrl)
 	if (li >= 0)
 		return letter_akey[li] | shiftctrl;
 
+	/* the arrows are Ctrl+- = + * on an Atari. With Shift they stay
+	   cursor keys (the Shift key itself is seen, INPUT_key_shift): the
+	   OS ignores Shift+Ctrl codes, and - = + * are typed with their own
+	   keys. Same in both keyboard types. */
 	switch (key) {
-	case KEY_LEFT:  return shift ? AKEY_PLUS : AKEY_LEFT;
-	case KEY_RIGHT: return shift ? AKEY_ASTERISK : AKEY_RIGHT;
-	case KEY_UP:    return shift ? AKEY_MINUS : AKEY_UP;
-	case KEY_DOWN:  return shift ? AKEY_EQUAL : AKEY_DOWN;
+	case KEY_LEFT:  return AKEY_LEFT;
+	case KEY_RIGHT: return AKEY_RIGHT;
+	case KEY_UP:    return AKEY_UP;
+	case KEY_DOWN:  return AKEY_DOWN;
 	case KEY_F6:    return AKEY_HELP ^ shiftctrl;
 	default: break;
 	}
 
+	if (!KMS_INPUT_keyboard_pc) {
+		for (i = 0; i < sizeof pos_map / sizeof pos_map[0]; i++)
+			if (pos_map[i].key == key)
+				return pos_map[i].akey | shiftctrl;
+	}
 	for (i = 0; i < sizeof symbol_map / sizeof symbol_map[0]; i++) {
 		if (symbol_map[i].key == key) {
 			int code = shift ? symbol_map[i].shifted : symbol_map[i].plain;
+			if (code == -1)
+				code = symbol_map[i].plain | AKEY_SHFT;
 			return ctrl ? (code | AKEY_CTRL) : code;
 		}
 	}
@@ -534,11 +599,20 @@ static int pad_stick(const struct pad_state *p)
 	return stick_from_dirs(dx, dy);
 }
 
+/* The gamepad that drives joystick STICK (F8 > Controls can swap 1 and 2;
+   menu navigation always follows the first gamepad). */
+static const struct pad_state *pad_for(int stick)
+{
+	if (KMS_INPUT_pad_swap && stick < 2)
+		stick = 1 - stick;
+	return &pads[stick];
+}
+
 int KMS_INPUT_Port(int num)
 {
 	int base = num * 2;
-	int s0 = pad_stick(&pads[base]);
-	int s1 = pad_stick(&pads[base + 1]);
+	int s0 = pad_stick(pad_for(base));
+	int s1 = pad_stick(pad_for(base + 1));
 	if (num == 0)
 		s0 &= keyboard_stick();
 	return s0 | (s1 << 4);
@@ -548,7 +622,7 @@ int KMS_INPUT_Trig(int num)
 {
 	if (num < 0 || num >= MAX_PADS)
 		return 1;
-	if (pads[num].fire)
+	if (pad_for(num)->fire)
 		return 0;
 	if (num == 0 && keyboard_fire())
 		return 0;
@@ -574,7 +648,14 @@ int KMS_INPUT_Keyboard(void)
 			key_pressed = 0;
 		}
 	}
+	if (code != AKEY_NONE)
+		last_code = code;
 	return code;
+}
+
+int KMS_INPUT_LastKey(void)
+{
+	return last_code;
 }
 
 static int keyboard_inner(void)
@@ -602,11 +683,15 @@ static int keyboard_inner(void)
 	    && !(INPUT_key_consol & INPUT_CONSOL_START))
 		return AKEY_5200_START;
 
-	/* Gamepad shortcuts and menu navigation. */
+	/* Gamepad shortcuts and menu navigation. Guide opens the System menu
+	   (a gamepad-only user reaches the Library and Shut down from
+	   there); inside a menu it does nothing, B goes back. */
 	for (p = 0; p < MAX_PADS; p++) {
 		if (pads[p].menu) {
 			pads[p].menu = 0;
-			return AKEY_UI;
+			if (!UI_is_active)
+				KMS_SYSMENU_requested = TRUE;
+			return AKEY_NONE;
 		}
 	}
 	if (UI_is_active && !key_pressed) {
@@ -625,7 +710,10 @@ static int keyboard_inner(void)
 	switch (lastkey) {
 	case KEY_F1:
 		key_pressed = 0;
-		return AKEY_UI;
+		/* the Help page; the stock atari800 menu is F8 > Advanced */
+		if (!UI_is_active)
+			KMS_HELP_requested = TRUE;
+		return AKEY_NONE;
 	case KEY_F2: case KEY_F3: case KEY_F4:
 		return AKEY_NONE; /* console keys, handled above */
 	case KEY_F5:
@@ -696,12 +784,30 @@ int KMS_INPUT_ReadConfig(char *option, char *parameters)
 {
 	if (strcmp(option, "KMS_ARROWS_JOYSTICK") == 0)
 		return (KMS_INPUT_arrows_joystick = Util_sscanbool(parameters)) != -1;
+	if (strcmp(option, "KMS_KEYBOARD") == 0) {
+		if (Util_stricmp(parameters, "pc") == 0)
+			KMS_INPUT_keyboard_pc = TRUE;
+		else if (Util_stricmp(parameters, "atari") == 0)
+			KMS_INPUT_keyboard_pc = FALSE;
+		else
+			return FALSE;
+		return TRUE;
+	}
+	if (strcmp(option, "KMS_PAD_SWAP") == 0) {
+		int v = Util_sscanbool(parameters);
+		if (v == -1)
+			return FALSE;
+		KMS_INPUT_pad_swap = v;
+		return TRUE;
+	}
 	return FALSE;
 }
 
 void KMS_INPUT_WriteConfig(FILE *fp)
 {
 	fprintf(fp, "KMS_ARROWS_JOYSTICK=%d\n", KMS_INPUT_arrows_joystick);
+	fprintf(fp, "KMS_KEYBOARD=%s\n", KMS_INPUT_keyboard_pc ? "pc" : "atari");
+	fprintf(fp, "KMS_PAD_SWAP=%d\n", KMS_INPUT_pad_swap);
 }
 
 int KMS_INPUT_Initialise(int *argc, char *argv[])

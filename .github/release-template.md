@@ -47,8 +47,8 @@ their plan with `--dry-run` / `-WhatIf` and ask before writing anything):
 Details: README, "Next to Linux or Windows (dual boot)".
 
 Then start the computer from the stick (boot menu key: usually F12; F9 on
-HP, Esc or F8 on ASUS). **F8** opens the System menu (Wi-Fi, boot into
-BASIC/ASH/FujiNet, shut down), **F9** the Library.
+HP, Esc or F8 on ASUS). **F1** shows every key, **F8** opens the System
+menu (Wi-Fi, boot into BASIC/ASH/FujiNet, shut down), **F9** the Library.
 
 ### Hardware
 

@@ -7,8 +7,9 @@
  * Sources, cycled with Tab: the whole stick (its atari/ folder, opening in
  * library/; FujiNet's SD is fujinet/SD there) and every USB drive PID 1
  * has mounted under /media/usb. RETURN on a file offers Run, Run with
- * BASIC, Mount, Copy to the library, FujiNet's SD or a USB drive, and
- * Favourite. Recent programs and favourites persist in
+ * BASIC, Mount as D1:-D4:, Copy to the library, FujiNet's SD or a USB
+ * drive, and Favourite. The Drives line shows what is mounted and opens
+ * a popup to eject one drive. Recent programs and favourites persist in
  * atari/config/library.cfg. Drawn with atari800's UI driver, like the F1
  * and F8 menus; everything happens on the host side. A .zip is opened
  * here too: its Atari files are listed, the chosen one is extracted to
@@ -48,6 +49,7 @@
 #include "util.h"
 #include "kms/kms_boot.h"
 #include "kms/kms_library.h"
+#include "kms/kms_sysmenu.h"
 #include "kms/kms_video.h"
 #include "kms/kms_zipfile.h"
 
@@ -69,6 +71,7 @@
 #define RV_PARENT    2
 #define RV_PREV      3
 #define RV_NEXT      4
+#define RV_DRIVES    5
 #define RV_RECENT    100
 #define RV_FAV       200
 #define RV_ENTRY     1000
@@ -82,8 +85,15 @@
 #define ACT_COPY_SD  22
 #define ACT_COPY_TO  23
 #define ACT_COPY_USB 30   /* + source index, in the "Copy to..." popup */
+#define ACT_MOUNT_D  10   /* + drive number 1..4: "Mount as Dn:" */
 #define ACT_FAV      50
 #define ACT_CANCEL   51
+
+/* Drives popup return values: 1..4 = D1:..D4: */
+#define DRV_CART     5
+#define DRV_TAPE     6
+#define DRV_EJECT    7
+#define DRV_CANCEL   8
 
 int KMS_LIBRARY_requested = FALSE;
 
@@ -797,14 +807,18 @@ static int run_file(const char *path, const char *ref, int with_basic)
 	return TRUE;
 }
 
-static void mount_file(const char *path)
+/* Mount a disk image in Dn: (no cold start; in D1: the next cold start
+   boots it, kms/boot.c), or insert a cartridge or tape. */
+static void mount_file(const char *path, int drive)
 {
+	char line[40];
 	int r;
 	switch (file_kind(path)) {
 	case FK_DISK:
-		if (SIO_Mount(1, path, FALSE)) {
-			Log_print("library: D1: %s", path);
-			message("Mounted as D1:");
+		if (SIO_Mount(drive, path, FALSE)) {
+			Log_print("library: D%d: %s", drive, path);
+			snprintf(line, sizeof line, "Mounted as D%d:", drive);
+			message(line);
 		}
 		else
 			cant("Could not mount", path);
@@ -1171,8 +1185,13 @@ static int action_popup(const char *run, const char *ref, const char *copy, cons
 		menu_add(ACT_RUN, NULL, "Run", NULL);
 		if (kind == FK_DISK && is_disk_image(run))
 			menu_add(ACT_RUN_BASIC, NULL, "Run with BASIC", NULL);
-		if (kind == FK_DISK)
-			menu_add(ACT_MOUNT, NULL, "Mount as D1:", NULL);
+		if (kind == FK_DISK) {
+			char item[16];
+			for (i = 1; i <= 4; i++) {
+				snprintf(item, sizeof item, "Mount as D%d:", i);
+				menu_add(ACT_MOUNT_D + i, NULL, item, NULL);
+			}
+		}
 		else if (kind == FK_CART)
 			menu_add(ACT_MOUNT, NULL, "Insert cartridge", NULL);
 		else if (kind == FK_TAPE)
@@ -1200,7 +1219,9 @@ static int action_popup(const char *run, const char *ref, const char *copy, cons
 		return TRUE; /* back to the Atari */
 	}
 	if (r == ACT_MOUNT)
-		mount_file(run);
+		mount_file(run, 1);
+	else if (r > ACT_MOUNT_D && r <= ACT_MOUNT_D + 4)
+		mount_file(run, r - ACT_MOUNT_D);
 	else if (r == ACT_COPY_LIB)
 		copy_file(copy, lib, FALSE);
 	else if (r == ACT_COPY_SD)
@@ -1239,6 +1260,138 @@ static int file_popup(const char *path_in)
 	return action_popup(is_regular(path) ? path : NULL, path, path, title);
 }
 
+/* ---- drives ------------------------------------------------------------ */
+
+static int disk_in(int i)
+{
+	return SIO_drive_status[i] == SIO_READ_ONLY || SIO_drive_status[i] == SIO_READ_WRITE;
+}
+
+/* "[ Drives: D1 Game (Disk 1).atr  D2 Game (Disk 2).atr ]": the slots in
+   use, D1-D4, cartridge, tape, cut to 38 columns with "..." when more
+   follow. */
+static void drives_line(char *out, size_t size)
+{
+	char items[6][48], body[40];
+	size_t room = 38 - strlen("[ Drives:  ]");
+	int n = 0, i;
+
+	for (i = 0; i < 4; i++)
+		if (disk_in(i))
+			snprintf(items[n++], sizeof items[0], "D%d %.40s", i + 1, base_name(SIO_filename[i]));
+	if (CARTRIDGE_main.type != CARTRIDGE_NONE)
+		snprintf(items[n++], sizeof items[0], "Cart %.40s", base_name(CARTRIDGE_main.filename));
+	if (CASSETTE_status != CASSETTE_STATUS_NONE)
+		snprintf(items[n++], sizeof items[0], "Tape %.40s", base_name(CASSETTE_filename));
+	if (n == 0) {
+		snprintf(out, size, "[ Drives: nothing mounted ]");
+		return;
+	}
+	body[0] = '\0';
+	for (i = 0; i < n; i++) {
+		size_t len = strlen(body);
+		size_t need = strlen(items[i]) + (len ? 2 : 0);
+		size_t reserve = i < n - 1 ? 3 : 0; /* "..." if the next does not fit */
+		if (len + need + reserve <= room) {
+			if (len)
+				strcat(body, "  ");
+			strcat(body, items[i]); /* fits: checked above */
+			continue;
+		}
+		if (len == 0) /* the first does not fit: cut it */
+			snprintf(body, sizeof body, "%.*s...", (int)(room - 3), items[i]);
+		else
+			strcat(body, "...");
+		break;
+	}
+	snprintf(out, size, "[ Drives: %.26s ]", body);
+}
+
+/* The Drives popup: RETURN on a slot in use ejects it (a disk drive is
+   switched off, as "Eject all" does; the cartridge with a cold start, as
+   atari800's own menu does: the running program loses its ROM), on an
+   empty one says how to fill it; either way back to the listing. "No"
+   stays in the popup. TRUE when the Atari was restarted. */
+static int drives_popup(void)
+{
+	char text[40];
+	int r, i, sel = 1;
+
+	for (;;) {
+		menu_reset();
+		menu_add(-1, NULL, "Drives", NULL);
+		for (i = 0; i < 4; i++) {
+			if (disk_in(i))
+				snprintf(text, sizeof text, "D%d: %.32s", i + 1, base_name(SIO_filename[i]));
+			else
+				snprintf(text, sizeof text, "D%d: empty", i + 1);
+			menu_add(1 + i, NULL, text, NULL);
+		}
+		if (CARTRIDGE_main.type != CARTRIDGE_NONE)
+			snprintf(text, sizeof text, "Cartridge: %.25s", base_name(CARTRIDGE_main.filename));
+		else
+			Util_strlcpy(text, "Cartridge: empty", sizeof text);
+		menu_add(DRV_CART, NULL, text, NULL);
+		if (CASSETTE_status != CASSETTE_STATUS_NONE)
+			snprintf(text, sizeof text, "Tape: %.30s", base_name(CASSETTE_filename));
+		else
+			Util_strlcpy(text, "Tape: empty", sizeof text);
+		menu_add(DRV_TAPE, NULL, text, NULL);
+		if (KMS_BOOT_SomethingMounted())
+			menu_add(DRV_EJECT, NULL, "Eject all & reboot", NULL);
+		menu_add(DRV_CANCEL, NULL, "Cancel", NULL);
+
+		r = UI_driver->fSelect("Drives", UI_SELECT_POPUP, sel, menu, NULL);
+		if (r < 0 || r == DRV_CANCEL || aborted())
+			return FALSE;
+		sel = r;
+		if (r == DRV_EJECT) {
+			Log_print("library: eject all");
+			KMS_BOOT_EjectAll();
+			return TRUE;
+		}
+		if (r >= 1 && r <= 4) {
+			if (!disk_in(r - 1)) {
+				snprintf(text, sizeof text, "Pick a file and choose Mount as D%d:", r);
+				message(text);
+				return FALSE;
+			}
+			snprintf(text, sizeof text, "Eject D%d:?", r);
+			if (confirm(text)) {
+				Log_print("library: eject D%d: %s", r, SIO_filename[r - 1]);
+				SIO_DisableDrive(r); /* as "Eject all": no BOOT ERROR from an empty D1: */
+				snprintf(text, sizeof text, "D%d: ejected", r);
+				message(text);
+				return FALSE; /* the listing shows the new Drives line */
+			}
+		}
+		else if (r == DRV_CART) {
+			if (CARTRIDGE_main.type == CARTRIDGE_NONE) {
+				message("Pick a .car file: Insert cartridge");
+				return FALSE;
+			}
+			if (confirm("Eject the cartridge and reboot?")) {
+				Log_print("library: eject cartridge %s", CARTRIDGE_main.filename);
+				CARTRIDGE_Remove();
+				Atari800_Coldstart(); /* the program ran from its ROM */
+				return TRUE;
+			}
+		}
+		else if (r == DRV_TAPE) {
+			if (CASSETTE_status == CASSETTE_STATUS_NONE) {
+				message("Pick a .cas file: Insert tape");
+				return FALSE;
+			}
+			if (confirm("Eject the tape?")) {
+				Log_print("library: eject tape %s", CASSETTE_filename);
+				CASSETTE_Remove();
+				message("Tape ejected");
+				return FALSE;
+			}
+		}
+	}
+}
+
 /* ---- the browser ------------------------------------------------------ */
 
 static void make_title(char *out, size_t size, const lib_source *src, const char *rel, const char *filter)
@@ -1267,6 +1420,7 @@ int KMS_LIBRARY_Run(void)
 
 	UI_is_active = TRUE;
 	UI_driver->fInit();
+	KMS_SYSMENU_HintSeen();
 	if (usb_hint_until > Util_time()) {
 		KMS_VIDEO_SetHint("", 0); /* they found the key */
 		usb_hint_until = 0;
@@ -1320,6 +1474,8 @@ int KMS_LIBRARY_Run(void)
 		menu_add(-1, NULL, line, NULL);
 		snprintf(line, sizeof line, "[ Filter: %.24s ]", filter[0] ? filter : "none");
 		menu_add(RV_FILTER, NULL, line, NULL);
+		drives_line(line, sizeof line);
+		menu_add(RV_DRIVES, NULL, line, NULL);
 		if (at_lib_root) {
 			menu_add(-1, NULL, n_recent ? "Recent:" : "Recent: nothing yet", NULL);
 			for (i = 0; i < n_recent; i++)
@@ -1401,6 +1557,8 @@ int KMS_LIBRARY_Run(void)
 				sel = -1;
 			}
 		}
+		else if (r == RV_DRIVES)
+			ran = drives_popup();
 		else if (r == RV_PREV) {
 			page--;
 			sel = -1;

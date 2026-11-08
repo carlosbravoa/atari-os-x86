@@ -8,9 +8,15 @@
 
 #include <stdio.h>
 
-/* Set by the input layer when F8 (or the gamepad guide button with a
-   modifier) is pressed; the main loop opens the menu on the next frame. */
+/* Set by the input layer when F8 (or the gamepad's Guide button) is
+   pressed; the main loop opens the menu on the next frame. */
 extern int KMS_SYSMENU_requested;
+
+/* TRUE while atari800's own menu (UI_Run) runs from F8 > "Advanced:
+   emulator menu...": its "System menu" entry then sets KMS_SYSMENU_reopen
+   and closes, back to the System menu that opened it (ui.c patch). */
+extern int KMS_SYSMENU_advanced_open;
+extern int KMS_SYSMENU_reopen;
 
 /* Persisted in the emulator config as KMS_VOLUME / KMS_BRIGHTNESS. */
 extern int KMS_SYSMENU_volume;     /* 0..100, -1 = untouched */
@@ -18,6 +24,9 @@ extern int KMS_SYSMENU_brightness; /* 0..100, -1 = untouched */
 extern int KMS_SYSMENU_hint_done;  /* the F8 hint has been shown and used */
 
 void KMS_SYSMENU_Run(void);
+/* F1, F8 or F9 was opened: the boot hint ("F1 = Help ...") goes and does
+   not come back (KMS_HINT_DONE). */
+void KMS_SYSMENU_HintSeen(void);
 /* Volume/brightness hotkeys (evdev KEY_* codes). */
 void KMS_SYSMENU_HotKey(int keycode);
 void KMS_SYSMENU_ApplySettings(void); /* after sound/video init */
