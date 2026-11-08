@@ -33,5 +33,6 @@ reply all show the version they were built from.
 - F8 System menu regrouped: Library, Boot into, Eject all, Display..., Sound, Controls..., Network..., Help, Hardware status, Save logs, Restart, Reboot, Shut down, Advanced; TV system and Brightness move into Display, Wi-Fi/IP/SSH into Network; the gamepad's Guide button opens it
 - F8 Controls: arrows as cursor keys or joystick 0, keyboard type PC (keys type their caps) or Atari (positional: Shift+2 = `"`, `-` = `<`, `[` = `-`, `'` = `+`, ...), gamepad 1 on joystick 0 or 1, gamepad buttons page (`KMS_KEYBOARD`, `KMS_PAD_SWAP`)
 - Shift+arrow keys are cursor keys too (they typed `- = + *`)
+- F8 "Report a problem...": a one-line description plus version, machine, settings, mounted media and the recent emulator/FujiNet logs written to `atari/logs/report-<MMDD-HHMMSS>.txt` on the stick (dmesg and full logs next to it), to attach to a GitHub issue
 - F1, F8 and F9 toggle: inside a menu the same key closes it (all levels), another of the three switches to its menu
 - F9 Library: a Drives line (what is in D1:-D4:, the cartridge and the tape) opening a popup to eject one of them or all; "Mount as D1:" to "D4:" for disk images

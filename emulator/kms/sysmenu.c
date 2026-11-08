@@ -29,15 +29,19 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <linux/input.h>
 
 #include "atari.h"
 #include "akey.h"
+#include "cartridge.h"
 #include "cfg.h"
 #include "input.h"
 #include "log.h"
 #include "platform.h"
+#include "sio.h"
 #include "ui.h"
 #include "util.h"
 #include "kms/kms_boot.h"
@@ -47,6 +51,10 @@
 #include "kms/kms_sysmenu.h"
 #include "kms/kms_video.h"
 #include <sys/utsname.h>
+
+#define STICK_USER "/media/atari" /* MEDIA_USER in init/init.c */
+
+static void wrapped_page(const char *title, const char *text);
 
 #define CTL_SOCK "/run/atari.ctl"
 #define ASH_CART "/media/atari/ash/ASH.CAR" /* ASH_CART in init/init.c */
@@ -306,18 +314,19 @@ static void add_line(char *page, size_t *n, size_t size, const char *fmt, ...)
 	}
 }
 
-static void hardware_page(const char *status)
+/* The hardware/status lines ('\0'-separated, as fInfoScreen wants them),
+   shared by "Hardware status" and the problem report. Returns the length. */
+static size_t hardware_lines(const char *status, char *page, size_t size)
 {
-	static char page[2048];
 	char line[200], v[128], w[128];
 	size_t n = 0;
 	FILE *f;
 
 	status_get(status, "version", v, sizeof v, "?");
-	add_line(page, &n, sizeof page, "Version: %.29s", v);
+	add_line(page, &n, size, "Version: %.29s", v);
 	read_line("/sys/class/dmi/id/product_name", v, sizeof v);
 	read_line("/sys/class/dmi/id/sys_vendor", w, sizeof w);
-	add_line(page, &n, sizeof page, "%.16s %.20s", w, v);
+	add_line(page, &n, size, "%.16s %.20s", w, v);
 	f = fopen("/proc/cpuinfo", "r");
 	v[0] = '\0';
 	while (f && fgets(line, sizeof line, f)) {
@@ -333,12 +342,12 @@ static void hardware_page(const char *status)
 		}
 	}
 	if (f) fclose(f);
-	add_line(page, &n, sizeof page, "CPU: %.34s", v);
+	add_line(page, &n, size, "CPU: %.34s", v);
 	f = fopen("/proc/meminfo", "r");
 	if (f) {
 		long kb = 0;
 		if (fscanf(f, "MemTotal: %ld", &kb) == 1)
-			add_line(page, &n, sizeof page, "RAM: %ld MB", kb / 1024);
+			add_line(page, &n, size, "RAM: %ld MB", kb / 1024);
 		fclose(f);
 	}
 	{
@@ -354,32 +363,32 @@ static void hardware_page(const char *status)
 				len += (size_t)snprintf(line + len, sizeof line - len, ", %s C", temp);
 			if (strcmp(watts, "n/a") != 0)
 				snprintf(line + len, sizeof line - len, ", %s W", watts);
-			add_line(page, &n, sizeof page, "%s", line);
+			add_line(page, &n, size, "%s", line);
 		}
 	}
-	add_line(page, &n, sizeof page, "Display: %s %dx%d @ %.4g Hz", KMS_VIDEO_driver, KMS_VIDEO_width, KMS_VIDEO_height, KMS_VIDEO_refresh);
-	add_line(page, &n, sizeof page, "  %s%s, scanlines %s%s", KMS_VIDEO_ScaleLabel(),
+	add_line(page, &n, size, "Display: %s %dx%d @ %.4g Hz", KMS_VIDEO_driver, KMS_VIDEO_width, KMS_VIDEO_height, KMS_VIDEO_refresh);
+	add_line(page, &n, size, "  %s%s, scanlines %s%s", KMS_VIDEO_ScaleLabel(),
 	         KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER ? " smooth" : "",
 	         KMS_VIDEO_ScanlinesPossible() || KMS_VIDEO_scanlines == KMS_SCANLINES_OFF ? KMS_VIDEO_ScanlinesLabel() : "n/a",
 	         KMS_VIDEO_NtscLook() ? ", NTSC TV" : "");
-	add_line(page, &n, sizeof page, "Atari %s %.1f Hz, pacing: %s", Atari800_tv_mode == Atari800_TV_PAL ? "PAL" : "NTSC",
+	add_line(page, &n, size, "Atari %s %.1f Hz, pacing: %s", Atari800_tv_mode == Atari800_TV_PAL ? "PAL" : "NTSC",
 	         KMS_VIDEO_AtariFps(), KMS_VIDEO_PacingLocked() && !Atari800_turbo ? "display" : "timer");
 	if (read_line("/proc/asound/cards", v, sizeof v)) {
 		char *p = strchr(v, ':');
-		add_line(page, &n, sizeof page, "Sound: %.32s", p ? p + 2 : v);
+		add_line(page, &n, size, "Sound: %.32s", p ? p + 2 : v);
 	}
 	else
-		add_line(page, &n, sizeof page, "Sound: no card");
+		add_line(page, &n, size, "Sound: no card");
 	status_get(status, "wifi", v, sizeof v, "no adapter");
-	add_line(page, &n, sizeof page, "Wi-Fi: %.30s", v);
+	add_line(page, &n, size, "Wi-Fi: %.30s", v);
 	status_get(status, "ip", v, sizeof v, "none");
-	add_line(page, &n, sizeof page, "IP: %s", v);
+	add_line(page, &n, size, "IP: %s", v);
 	status_get(status, "battery", v, sizeof v, "");
 	if (v[0])
-		add_line(page, &n, sizeof page, "Battery: %s%%", v);
+		add_line(page, &n, size, "Battery: %s%%", v);
 	status_get(status, "media", v, sizeof v, "?");
 	status_get(status, "efi", w, sizeof w, "?");
-	add_line(page, &n, sizeof page, "Media: %s, UEFI %s", v, w);
+	add_line(page, &n, size, "Media: %s, UEFI %s", v, w);
 	/* loopback mode (atari.image): "image <dev> <path>", the path's tail
 	   when it is longer than the line */
 	status_get(status, "image", v, sizeof v, "");
@@ -389,18 +398,18 @@ static void hardware_page(const char *status)
 			size_t plen;
 			*path++ = '\0';
 			plen = strlen(path);
-			add_line(page, &n, sizeof page, "Image on %.20s:", v);
-			add_line(page, &n, sizeof page, "  %s%s", plen > 34 ? "..." : "", plen > 34 ? path + plen - 31 : path);
+			add_line(page, &n, size, "Image on %.20s:", v);
+			add_line(page, &n, size, "  %s%s", plen > 34 ? "..." : "", plen > 34 ? path + plen - 31 : path);
 		}
 	}
 	boot_of(status, v, sizeof v);
 	status_get(status, "ssh", w, sizeof w, "?");
-	add_line(page, &n, sizeof page, "Boot: %s, SSH %s", boot_label(v), w);
-	add_line(page, &n, sizeof page, "Started: %.30s", KMS_BOOT_LastRoute());
+	add_line(page, &n, size, "Boot: %s, SSH %s", boot_label(v), w);
+	add_line(page, &n, size, "Started: %.30s", KMS_BOOT_LastRoute());
 	{
 		struct utsname u;
 		if (uname(&u) == 0)
-			add_line(page, &n, sizeof page, "Linux %.30s", u.release);
+			add_line(page, &n, size, "Linux %.30s", u.release);
 	}
 	{
 		double up = 0;
@@ -409,13 +418,126 @@ static void hardware_page(const char *status)
 			if (fscanf(f, "%lf", &up) != 1) up = 0;
 			fclose(f);
 		}
-		add_line(page, &n, sizeof page, "Up %d min", (int)(up / 60));
+		add_line(page, &n, size, "Up %d min", (int)(up / 60));
 	}
 	if (n + 2 < sizeof page) {
 		page[n++] = '\n';
 		page[n] = '\0';
 	}
+	return n;
+}
+
+static void hardware_page(const char *status)
+{
+	static char page[2048];
+	hardware_lines(status, page, sizeof page);
 	UI_driver->fInfoScreen("Hardware", page);
+}
+
+/* ---- problem report ------------------------------------------------------ */
+
+/* The last LINES lines of PATH appended to OUT (from its last 64 KB). */
+static void tail_file(FILE *out, const char *path, int lines)
+{
+	static char buf[65536];
+	FILE *f = fopen(path, "r");
+	long size, n;
+	char *p, *q, *end;
+	int count = 0;
+
+	if (!f) {
+		fprintf(out, "(no %s)\n", path);
+		return;
+	}
+	fseek(f, 0, SEEK_END);
+	size = ftell(f);
+	if (size > (long)sizeof buf - 1)
+		fseek(f, size - ((long)sizeof buf - 1), SEEK_SET);
+	else
+		fseek(f, 0, SEEK_SET);
+	n = (long)fread(buf, 1, sizeof buf - 1, f);
+	fclose(f);
+	if (n < 0)
+		n = 0;
+	buf[n] = '\0';
+	p = buf;
+	if (size > n) { /* started mid-line: drop the partial first line */
+		p = strchr(buf, '\n');
+		p = p ? p + 1 : buf + n;
+	}
+	end = buf + n;
+	/* the last LINES lines, leaving out the key-by-key noise of
+	   -evdev-debug (the debug image) */
+	q = end;
+	while (q > p) {
+		if (q[-1] == '\n') {
+			if (strncmp(q, "evdev: ", 7) != 0 && ++count > lines)
+				break;
+		}
+		q--;
+	}
+	if (q > p && q[-1] != '\n')
+		q = p;
+	while (q < end) {
+		char *nl = memchr(q, '\n', (size_t)(end - q));
+		size_t len = nl ? (size_t)(nl - q) + 1 : (size_t)(end - q);
+		if (strncmp(q, "evdev: ", 7) != 0)
+			fwrite(q, 1, len, out);
+		q += len;
+	}
+}
+
+/* "Report a problem...": one line from the user, then a text file on the
+   stick with what a GitHub issue needs: version, machine, settings,
+   what is mounted, the recent emulator and FujiNet logs. init's "logs"
+   puts dmesg.txt and the full logs next to it. */
+static void report_menu(const char *status)
+{
+	static char page[2048];
+	char text[120] = "", path[300], stamp[32], line[1024];
+	size_t n, i;
+	time_t now = time(NULL);
+	FILE *f;
+	int k;
+
+	if (!UI_driver->fEditString("What went wrong? (one line)", text, sizeof text))
+		return;
+	Util_trim(text);
+	strftime(stamp, sizeof stamp, "%m%d-%H%M%S", localtime(&now)); /* short: the name must fit one menu line */
+	snprintf(path, sizeof path, "%s/logs/report-%s.txt", STICK_USER, stamp);
+	ctl_request("logs", line, sizeof line); /* dmesg.txt and the full logs */
+	mkdir(STICK_USER "/logs", 0755);
+	f = fopen(path, "w");
+	if (!f) {
+		UI_driver->fMessage("Could not write to the stick", TRUE);
+		return;
+	}
+	fprintf(f, "atari-os-x86 problem report\n%s\nProblem: %s\n\n== Machine ==\n",
+	        ctime(&now), text[0] ? text : "(no description)");
+	n = hardware_lines(status, page, sizeof page);
+	for (i = 0; i < n; i += strlen(page + i) + 1)
+		fprintf(f, "%s\n", page + i);
+	fprintf(f, "\n== Settings ==\nKeyboard type: %s\nArrows: %s\nBoot target: %s\n",
+	        KMS_INPUT_keyboard_pc ? "PC" : "Atari",
+	        KMS_INPUT_arrows_joystick ? "joystick 0" : "cursor keys", KMS_BOOT_Target());
+	fprintf(f, "\n== Mounted ==\n");
+	for (k = 0; k < 4; k++)
+		if (SIO_drive_status[k] == SIO_READ_ONLY || SIO_drive_status[k] == SIO_READ_WRITE)
+			fprintf(f, "D%d: %s\n", k + 1, SIO_filename[k]);
+	if (CARTRIDGE_main.type != CARTRIDGE_NONE)
+		fprintf(f, "Cartridge: %s\n", CARTRIDGE_main.filename);
+	fprintf(f, "\n== atari800.log (last 80 lines) ==\n");
+	tail_file(f, "/run/atari800.log", 80);
+	fprintf(f, "\n== fujinet.log (last 40 lines) ==\n");
+	tail_file(f, "/run/fujinet.log", 40);
+	fprintf(f, "\n(dmesg.txt, the full logs and system.txt are in this folder)\n");
+	fflush(f);
+	fsync(fileno(f));
+	fclose(f);
+	Log_print("sysmenu: report %s", path);
+	snprintf(line, sizeof line, "Saved on the stick:\natari/logs/report-%s.txt\n"
+	         "dmesg and the full logs are next to it. Attach the file to a GitHub issue of atari-os-x86.", stamp);
+	wrapped_page("Report saved", line);
 }
 
 /* ---- hotkeys ---------------------------------------------------------- */
@@ -1198,6 +1320,7 @@ void KMS_SYSMENU_Run(void)
 			UI_MENU_SUBMENU(7, net_item),
 			UI_MENU_ACTION(8, "Help: keys and menus"),
 			UI_MENU_ACTION(9, "Hardware status"),
+			UI_MENU_ACTION(17, "Report a problem..."),
 			UI_MENU_ACTION(10, "Install onto this laptop's disk..."),
 			UI_MENU_ACTION(11, "Save logs to the stick"),
 			UI_MENU_ACTION(12, "Restart emulator"),
@@ -1277,6 +1400,9 @@ void KMS_SYSMENU_Run(void)
 			break;
 		case 9:
 			hardware_page(status);
+			break;
+		case 17:
+			report_menu(status);
 			break;
 		case 10:
 			if (install_menu())

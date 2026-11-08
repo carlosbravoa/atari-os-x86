@@ -249,6 +249,7 @@ Controls...     Arrows, Keyboard type, Gamepad 1 drives, Gamepad buttons
 Network: <ssid>  Wi-Fi, IP, Remote access (SSH), SSH password
 Help: keys and menus
 Hardware status
+Report a problem...
 Install onto this laptop's disk...   (stick + internal disk only)
 Save logs to the stick
 Restart emulator
@@ -314,6 +315,10 @@ Back to Atari                   Esc
   options, TV system and pacing, sound card, Wi-Fi, IP, battery, boot
   medium, boot target, what the last cold start booted (and whether BASIC
   was on), kernel
+- **Report a problem...**: asks for a one-line description and writes
+  `atari/logs/report-<MMDD-HHMMSS>.txt` on the stick (version, machine, settings,
+  what is mounted, the recent emulator and FujiNet logs), with dmesg and
+  the full logs saved next to it; attach the file to a GitHub issue
 - **Install onto this laptop's disk...** (only when running from a stick
   and an internal disk is there; see "Install onto the laptop's disk")
 - Save logs to the stick, restart emulator
@@ -514,9 +519,9 @@ or turn a release image into one with `qemu-test.sh debug-image <img>`
 `type "<text>"` types a string, one `sendkey` per character on a US layout
 (`\n` is RETURN; `QEMU_TYPE_DELAY`, default 0.15 s, between keys), which is
 how ASH is driven headless, e.g. `scripts/qemu-test.sh type 'ls sd:/\n'`.
-Menu positions for `key` recipes: F8 then `down` 12 times and `ret` is
-**Shut down** (13 times when "Install onto this laptop's disk..." is
-shown, i.e. with an internal disk attached), 13 times is "Advanced:
+Menu positions for `key` recipes: F8 then `down` 13 times and `ret` is
+**Shut down** (14 times when "Install onto this laptop's disk..." is
+shown, i.e. with an internal disk attached), 14 times is "Advanced:
 emulator menu...", whose "System menu" entry is 19 `down`s from its top.
 `QEMU_EXTRA` adds QEMU arguments; `scripts/mk-usb-test.sh` builds
 `build/usb-test.img`, a USB drive with Atari files for the Library:
