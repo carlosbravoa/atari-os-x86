@@ -389,6 +389,14 @@ static size_t hardware_lines(const char *status, char *page, size_t size)
 	status_get(status, "media", v, sizeof v, "?");
 	status_get(status, "efi", w, sizeof w, "?");
 	add_line(page, &n, size, "Media: %s, UEFI %s", v, w);
+	/* init's fsck.fat of the stick at boot: "fsck clean|repaired|failed|skipped" */
+	status_get(status, "fsck", v, sizeof v, "skipped");
+	if (strcmp(v, "clean") == 0)
+		add_line(page, &n, size, "Stick: FAT clean");
+	else if (strcmp(v, "repaired") == 0)
+		add_line(page, &n, size, "Stick: FAT repaired at boot");
+	else if (strcmp(v, "failed") == 0)
+		add_line(page, &n, size, "Stick: FAT check failed");
 	/* loopback mode (atari.image): "image <dev> <path>", the path's tail
 	   when it is longer than the line */
 	status_get(status, "image", v, sizeof v, "");
@@ -420,7 +428,7 @@ static size_t hardware_lines(const char *status, char *page, size_t size)
 		}
 		add_line(page, &n, size, "Up %d min", (int)(up / 60));
 	}
-	if (n + 2 < sizeof page) {
+	if (n + 2 < size) { /* page is a pointer here */
 		page[n++] = '\n';
 		page[n] = '\0';
 	}
@@ -515,7 +523,7 @@ static void report_menu(const char *status)
 	fprintf(f, "atari-os-x86 problem report\n%s\nProblem: %s\n\n== Machine ==\n",
 	        ctime(&now), text[0] ? text : "(no description)");
 	n = hardware_lines(status, page, sizeof page);
-	for (i = 0; i < n; i += strlen(page + i) + 1)
+	for (i = 0; i < n && page[i] != '\n'; i += strlen(page + i) + 1) /* '\n' ends the page */
 		fprintf(f, "%s\n", page + i);
 	fprintf(f, "\n== Settings ==\nKeyboard type: %s\nArrows: %s\nBoot target: %s\n",
 	        KMS_INPUT_keyboard_pc ? "PC" : "Atari",

@@ -227,6 +227,19 @@ mounted`); RETURN on it lists D1:-D4:, the cartridge and the tape: RETURN
 on one in use ejects it after a Yes (a disk without a restart; the
 cartridge with one, as its program loses its ROM), and **Eject all &
 reboot** goes back to the boot target.
+Under Drives, a folder on a USB drive (its root too) has **`[ Copy this
+folder to Library ]`**: it copies the folder's Atari files (the ones the
+listing shows, a `.zip` as one file), every folder below it included,
+into `library/<folder>/` (a drive's root into `library/<drive label>/`).
+It counts first and asks (`Copy "DEMOS" to Library?`, with the number of
+files and the size); it refuses when the stick is short of space ("Needs
+312 MB, Library has 201 MB free"). Files already there with the same
+size are skipped, so a second copy only adds what is new; the message line
+shows `Copying 12/230: name.atr`, Esc between two files stops (what was
+copied stays), and the end says `Copied 228 files, 2 skipped, 310 MB`.
+In `library/` and its folders, with a USB drive plugged in, the line is
+**`[ Copy this folder to USB... ]`** the other way round (onto the drive's
+root, "Safe to unplug" at the end).
 `Stick: /` and `Stick: /library` list the last 8 programs run and the
 favourites (`atari/config/library.cfg`). Multi-disk sets named
 `... (Disk 1)...`, `..._d1...` or `... Side 1...` get disks 2-4 in D2:-D4:.
@@ -336,7 +349,15 @@ Back to Atari                   Esc
 
 Boot shows an Atari-style splash with progress lines; the first boots show
 a "F1 = Help   F8 = System   F9 = Library" hint under the picture until
-one of the three is opened.
+one of the three is opened. Before the stick's FAT is mounted read-write
+init checks it with `fsck.fat -a -w` ("Checking the stick..."; a second
+at most for a 1 GiB FAT): it clears the dirty bit an unclean stop leaves,
+fixes the free-cluster count and reclaims lost clusters. The result is in
+the log (`fsck: /dev/sda1: clean`, `repaired (reclaimed N clusters, M
+bytes)` or `failed`) and on the Hardware status page (`Stick: FAT clean`
+/ `FAT repaired at boot`); the stick is mounted either way. FAT USB drives
+are checked the same way when they are plugged in (60 s at most; exFAT
+and NTFS have no checker here).
 
 ### Help (F1)
 

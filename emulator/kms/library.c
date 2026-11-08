@@ -9,7 +9,8 @@
  * has mounted under /media/usb. RETURN on a file offers Run, Run with
  * BASIC, Mount as D1:-D4:, Copy to the library, FujiNet's SD or a USB
  * drive, and Favourite. The Drives line shows what is mounted and opens
- * a popup to eject one drive. Recent programs and favourites persist in
+ * a popup to eject one drive. A whole folder is copied from a USB drive
+ * into the library, or from the library onto a USB drive. Recent programs and favourites persist in
  * atari/config/library.cfg. Drawn with atari800's UI driver, like the F1
  * and F8 menus; everything happens on the host side. A .zip is opened
  * here too: its Atari files are listed, the chosen one is extracted to
@@ -36,6 +37,7 @@
 #include <unistd.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 
 #include "afile.h"
 #include "akey.h"
@@ -73,6 +75,7 @@
 #define RV_PREV      3
 #define RV_NEXT      4
 #define RV_DRIVES    5
+#define RV_COPY_DIR  6
 #define RV_RECENT    100
 #define RV_FAV       200
 #define RV_ENTRY     1000
@@ -866,8 +869,9 @@ static void copy_failed(int err)
 	message(line);
 }
 
-/* Returns 0 or an errno value; the destination is removed on failure. */
-static int copy_data(const char *from, const char *to)
+/* Returns 0 or an errno value; the destination is removed on failure.
+   Progress on the message line: "LABEL 40%" ("Copying... 40%"). */
+static int copy_data(const char *from, const char *to, const char *label)
 {
 	static unsigned char buf[65536];
 	struct stat st;
@@ -916,9 +920,9 @@ static int copy_data(const char *from, const char *to)
 		done += (double)n;
 		pct = total > 0 ? (int)(done * 100 / total) : 100;
 		if (pct / 5 != last / 5) {
-			char line[32];
+			char line[48];
 			last = pct;
-			snprintf(line, sizeof line, "Copying... %d%%", pct);
+			snprintf(line, sizeof line, "%.33s %d%%", label ? label : "Copying...", pct);
 			UI_driver->fMessage(line, FALSE);
 		}
 	}
@@ -969,7 +973,7 @@ static void copy_file(const char *path, const char *dst_root, int usb)
 		copy_failed(errno);
 		return;
 	}
-	err = copy_data(path, target);
+	err = copy_data(path, target, NULL);
 	if (err) {
 		Log_print("library: copy %s -> %s failed: %s", path, target, strerror(err));
 		copy_failed(err);
@@ -1138,11 +1142,12 @@ static int zip_prepare(const char *zip, const char *want, char *entry, size_t es
    its drive is not plugged in); ref: what Recent and Favourites remember;
    copy: what "Copy to" copies (a zip is copied whole); title: its name.
    Returns TRUE when a program was started. */
-/* "Copy to...": the USB drives other than the one COPY is on. */
-static void copy_to_usb(const char *copy)
+/* "Copy to...": picks one of the USB drives other than source FROM;
+   its index in sources[], or -1. */
+static int pick_usb(int from)
 {
 	char line[40];
-	int i, r, from = source_of(copy);
+	int i, r;
 	menu_reset();
 	menu_add(-1, NULL, "Copy to", NULL);
 	for (i = 1; i < n_sources; i++)
@@ -1153,7 +1158,15 @@ static void copy_to_usb(const char *copy)
 	menu_add(ACT_CANCEL, NULL, "Cancel", NULL);
 	r = UI_driver->fSelect("Copy to", UI_SELECT_POPUP, menu_first_selectable(), menu, NULL);
 	if (r > ACT_COPY_USB && r < ACT_COPY_USB + n_sources)
-		copy_file(copy, sources[r - ACT_COPY_USB].root, TRUE);
+		return r - ACT_COPY_USB;
+	return -1;
+}
+
+static void copy_to_usb(const char *copy)
+{
+	int to = pick_usb(source_of(copy));
+	if (to > 0)
+		copy_file(copy, sources[to].root, TRUE);
 }
 
 static int is_disk_image(const char *name)
@@ -1393,6 +1406,250 @@ static int drives_popup(void)
 	}
 }
 
+/* ---- copying a folder -------------------------------------------------- */
+
+#define TREE_DEPTH   16   /* folders deeper than this are left out */
+
+/* A folder copy: its Atari files (what the listing shows; a .zip is one
+   file), counted first, then copied. */
+typedef struct {
+	int files;          /* Atari files in the tree */
+	int there;          /* of those, already at the destination with the same size */
+	double bytes;       /* their total size */
+	double need;        /* the rest, rounded up to clusters of the destination */
+	unsigned long cluster;
+	int done, copied, failed, stopped;
+	double copied_bytes;
+	int err;            /* the last failure */
+} tree_copy;
+
+static int same_size_there(const char *path, const struct stat *src)
+{
+	struct stat st;
+	return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == src->st_size;
+}
+
+static const char *plural(int n)
+{
+	return n == 1 ? "file" : "files";
+}
+
+/* "312 MB" */
+static void format_total(double bytes, char *out, size_t size)
+{
+	const double mb = 1024.0 * 1024.0;
+	if (bytes < mb)
+		snprintf(out, size, "%lu KB", (unsigned long)((bytes + 1023) / 1024));
+	else if (bytes < 10240.0 * mb)
+		snprintf(out, size, "%lu MB", (unsigned long)((bytes + mb - 1) / mb));
+	else
+		snprintf(out, size, "%.1f GB", bytes / (1024.0 * mb));
+}
+
+/* Between files: Esc (or F1/F8/F9, a signal from init) stops the copy. */
+static int copy_cancelled(void)
+{
+	int k = PLATFORM_Keyboard();
+	if (k == AKEY_EXIT)
+		UI_alt_function = UI_MENU_EXIT; /* as the UI driver does: leave the menus */
+	return k == AKEY_ESCAPE || k == AKEY_EXIT || KMS_INPUT_close_menus || aborted();
+}
+
+/* Copy errors after which the rest would fail too. */
+static int copy_fatal(int err)
+{
+	return err == ENOSPC || err == EIO || err == EROFS || err == ENODEV || err == ENXIO;
+}
+
+/* Walks FROM; the same names below TO. Counts, or with copy copies. */
+static void tree_walk(const char *from, const char *to, int depth, int copy, tree_copy *t)
+{
+	char src[FILENAME_MAX], dst[FILENAME_MAX], label[40];
+	struct dirent *e;
+	struct stat st;
+	DIR *d;
+
+	if (depth > TREE_DEPTH || t->stopped)
+		return;
+	d = opendir(from);
+	if (!d) {
+		if (copy) {
+			Log_print("library: cannot read %s: %s", from, strerror(errno));
+			t->err = errno;
+			t->failed++;
+		}
+		return;
+	}
+	while (!t->stopped && (e = readdir(d)) != NULL) {
+		int err;
+		if (e->d_name[0] == '.')
+			continue;
+		join_path(src, sizeof src, from, e->d_name);
+		join_path(dst, sizeof dst, to, e->d_name);
+		if (stat(src, &st) != 0)
+			continue;
+		if (S_ISDIR(st.st_mode)) {
+			tree_walk(src, dst, depth + 1, copy, t);
+			continue;
+		}
+		if (!S_ISREG(st.st_mode) || !is_media(e->d_name))
+			continue;
+		if (!copy) {
+			t->files++;
+			t->bytes += (double)st.st_size;
+			if (same_size_there(dst, &st))
+				t->there++;
+			else
+				t->need += (double)(((unsigned long)st.st_size + t->cluster - 1) / t->cluster) * (double)t->cluster;
+			continue;
+		}
+		t->done++;
+		if (same_size_there(dst, &st))
+			continue;
+		if (copy_cancelled()) {
+			t->stopped = TRUE;
+			break;
+		}
+		if (!make_dirs(to))
+			err = errno;
+		else {
+			int room = 38 - 5 - snprintf(label, sizeof label, "Copying %d/%d: ", t->done, t->files);
+			snprintf(label, sizeof label, "Copying %d/%d: %.*s", t->done, t->files, room > 4 ? room : 4, e->d_name);
+			err = copy_data(src, dst, label);
+		}
+		if (err) {
+			Log_print("library: copy %s -> %s failed: %s", src, dst, strerror(err));
+			t->err = err;
+			t->failed++;
+			if (copy_fatal(err))
+				t->stopped = TRUE;
+			continue;
+		}
+		t->copied++;
+		t->copied_bytes += (double)st.st_size;
+	}
+	closedir(d);
+}
+
+/* Yes/No under a question and a second line. */
+static int confirm2(const char *question, const char *detail)
+{
+	menu_reset();
+	menu_add(-1, NULL, question, NULL);
+	menu_add(-1, NULL, detail, NULL);
+	menu_add(1, NULL, "Yes", NULL);
+	menu_add(2, NULL, "No", NULL);
+	return UI_driver->fSelect(question, UI_SELECT_POPUP, 2, menu, NULL) == 1;
+}
+
+/* Copy the folder FROM, with everything below it, into DST_ROOT/NAME.
+   DST_NAME: what the destination is called on screen ("Library", "USB
+   GAMES"); usb: the destination is a USB drive. */
+static void copy_folder(const char *from, const char *dst_root, const char *name, const char *dst_name, int usb)
+{
+	char to[FILENAME_MAX], line[80], total[16], free_text[16], q[40];
+	struct statvfs vfs;
+	struct stat st;
+	tree_copy t;
+	double avail;
+	int room;
+
+	join_path(to, sizeof to, dst_root, name);
+	if (strcmp(to, from) == 0 || below(to, from)) {
+		message("Cannot copy a folder into itself");
+		return;
+	}
+	if (stat(to, &st) == 0 && !S_ISDIR(st.st_mode)) {
+		message("A file there has that name");
+		return;
+	}
+	if (!make_dirs(dst_root) || statvfs(dst_root, &vfs) != 0) {
+		copy_failed(errno);
+		return;
+	}
+	memset(&t, 0, sizeof t);
+	t.cluster = vfs.f_frsize ? (unsigned long)vfs.f_frsize : (unsigned long)vfs.f_bsize;
+	if (t.cluster == 0)
+		t.cluster = 512;
+	UI_driver->fMessage("Counting files...", FALSE);
+	tree_walk(from, to, 0, FALSE, &t);
+	UI_driver->fMessage("", FALSE);
+	if (t.files == 0) {
+		message("No Atari files in this folder");
+		return;
+	}
+	format_total(t.bytes, total, sizeof total);
+	if (t.there == t.files) {
+		snprintf(line, sizeof line, "All %d files are there already", t.files);
+		message(line);
+		return;
+	}
+	avail = (double)vfs.f_bavail * (double)(vfs.f_frsize ? vfs.f_frsize : vfs.f_bsize);
+	if (t.need > avail) {
+		char need_text[16];
+		format_total(t.need, need_text, sizeof need_text);
+		format_total(avail, free_text, sizeof free_text);
+		room = 38 - (int)strlen("Needs ,  has  free") - (int)strlen(need_text) - (int)strlen(free_text);
+		snprintf(line, sizeof line, "Needs %s, %.*s has %s free", need_text, room > 3 ? room : 3,
+		         usb ? dst_name + 4 : dst_name, free_text);
+		Log_print("library: copy folder %s -> %s: %s", from, to, line);
+		message(line);
+		return;
+	}
+	room = 38 - (int)strlen("Copy \"\" to ?") - (int)strlen(dst_name);
+	snprintf(q, sizeof q, "Copy \"%.*s\" to %s?", room > 4 ? room : 4, name, dst_name);
+	if (t.there)
+		snprintf(line, sizeof line, "%d %s, %s (%d there)", t.files, plural(t.files), total, t.there);
+	else
+		snprintf(line, sizeof line, "%d %s, %s", t.files, plural(t.files), total);
+	if (!confirm2(q, line))
+		return;
+
+	tree_walk(from, to, 0, TRUE, &t);
+	sync();
+	format_total(t.copied_bytes, total, sizeof total);
+	Log_print("library: copy folder %s -> %s: %d copied, %d skipped, %d failed%s, %.0f bytes",
+	          from, to, t.copied, t.there, t.failed, t.stopped && !t.err ? ", stopped" : "", t.copied_bytes);
+	if (t.failed)
+		snprintf(line, sizeof line, "%d copied, %d failed: %.16s", t.copied, t.failed, strerror(t.err));
+	else if (t.stopped)
+		snprintf(line, sizeof line, "Stopped: %d copied, %s", t.copied, total);
+	else if (t.there)
+		snprintf(line, sizeof line, "Copied %d %s, %d skipped, %s", t.copied, plural(t.copied), t.there, total);
+	else
+		snprintf(line, sizeof line, "Copied %d %s, %s", t.copied, plural(t.copied), total);
+	if (usb && !t.failed) { /* synced above */
+		if (strlen(line) + strlen(". Safe to unplug") <= 38)
+			strcat(line, ". Safe to unplug"); /* fits: checked */
+		else {
+			message(line);
+			Util_strlcpy(line, "Safe to unplug.", sizeof line);
+		}
+	}
+	message(line);
+}
+
+/* The folder line: from a USB drive into the library, keeping the folder
+   (a drive's root as its label); from the library onto a USB drive. */
+static void copy_this_folder(int src, const char *dir)
+{
+	char lib[FILENAME_MAX], name[64];
+	int to;
+
+	library_dir(lib, sizeof lib);
+	if (sources[src].kind == SRC_USB) {
+		if (strcmp(dir, sources[src].root) == 0)
+			Util_strlcpy(name, base_name(sources[src].root), sizeof name);
+		else
+			Util_strlcpy(name, base_name(dir), sizeof name);
+		copy_folder(dir, lib, name, "Library", FALSE);
+		return;
+	}
+	to = n_sources == 2 ? 1 : pick_usb(src);
+	if (to > 0)
+		copy_folder(dir, sources[to].root, base_name(dir), sources[to].name, TRUE);
+}
+
 /* ---- the browser ------------------------------------------------------ */
 
 static void make_title(char *out, size_t size, const lib_source *src, const char *rel, const char *filter)
@@ -1480,6 +1737,16 @@ int KMS_LIBRARY_Run(void)
 		menu_add(RV_FILTER, NULL, line, NULL);
 		drives_line(line, sizeof line);
 		menu_add(RV_DRIVES, NULL, line, NULL);
+		{
+			/* the whole folder: from a USB drive into the library, from
+			   the library onto a USB drive */
+			char lib[FILENAME_MAX];
+			library_dir(lib, sizeof lib);
+			if (sources[src].kind == SRC_USB)
+				menu_add(RV_COPY_DIR, NULL, "[ Copy this folder to Library ]", NULL);
+			else if (n_sources > 1 && (strcmp(dir, lib) == 0 || below(dir, lib)))
+				menu_add(RV_COPY_DIR, NULL, "[ Copy this folder to USB... ]", NULL);
+		}
 		if (at_lib_root) {
 			menu_add(-1, NULL, n_recent ? "Recent:" : "Recent: nothing yet", NULL);
 			for (i = 0; i < n_recent; i++)
@@ -1563,6 +1830,8 @@ int KMS_LIBRARY_Run(void)
 		}
 		else if (r == RV_DRIVES)
 			ran = drives_popup();
+		else if (r == RV_COPY_DIR)
+			copy_this_folder(src, dir);
 		else if (r == RV_PREV) {
 			page--;
 			sel = -1;

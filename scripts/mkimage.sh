@@ -207,10 +207,11 @@ copy_deps "$INITRAMFS/sbin/wpa_supplicant" "$INITRAMFS/sbin/wpa_cli" "$INITRAMFS
 # and the limine CLI for the MBR. limine comes from this build environment,
 # not the stage: it is the same package whose limine-bios.sys and
 # BOOTX64.EFI go onto the stick (step 4), and bios-install must match them.
-cp "$STAGE/sbin/sfdisk" "$STAGE/sbin/mkfs.fat" "$INITRAMFS/sbin/"
+# fsck.fat: init checks every FAT before mounting it read-write.
+cp "$STAGE/sbin/sfdisk" "$STAGE/sbin/mkfs.fat" "$STAGE/sbin/fsck.fat" "$INITRAMFS/sbin/"
 ln -sf mkfs.fat "$INITRAMFS/sbin/mkfs.vfat"
 cp /usr/bin/limine "$INITRAMFS/usr/bin/limine"
-copy_deps "$INITRAMFS/sbin/sfdisk" "$INITRAMFS/sbin/mkfs.fat" "$INITRAMFS/usr/bin/limine"
+copy_deps "$INITRAMFS/sbin/sfdisk" "$INITRAMFS/sbin/mkfs.fat" "$INITRAMFS/sbin/fsck.fat" "$INITRAMFS/usr/bin/limine"
 # dropbear needs an account database for root
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$INITRAMFS/etc/passwd"
 printf 'root:x:0:\n' > "$INITRAMFS/etc/group"

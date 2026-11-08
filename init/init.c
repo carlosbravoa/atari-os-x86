@@ -755,19 +755,148 @@ static int try_image_uuid(void);
 static int disk_of(const char *link, char *out, size_t size);
 static void blkid_tag(const char *line, const char *key, char *out, size_t size);
 
+/* ---- FAT check ---------------------------------------------------------- */
+
+#define FSCK_FAT       "/sbin/fsck.fat"
+#define FSCK_TIMEOUT_S 60
+
+/* The stick's result, for "status": clean, repaired, failed or skipped. */
+static const char *stick_fsck = "skipped";
+
+/* fsck.fat -a -w on DEV, which must not be mounted. An unclean stop
+   leaves the dirty bit set, a wrong free count and lost clusters (space
+   nobody can use, until the copies fail with ENOSPC); this reclaims them.
+   At most FSCK_TIMEOUT_S, then it is killed. Logs one line; returns
+   "clean", "repaired" or "failed" (also for a missing fsck.fat). */
+static const char *fat_check(const char *dev)
+{
+	char *argv[] = { FSCK_FAT, "-a", "-w", (char *)dev, NULL };
+	char buf[512], cur[160], nclus[16] = "", nbytes[24] = "";
+	int fds[2], status = 0, eof = 0, rc;
+	size_t len = 0;
+	double deadline;
+	pid_t pid;
+
+	if (!exists(FSCK_FAT) || pipe(fds) < 0) {
+		logmsg("fsck: %s: failed (no fsck.fat)", dev);
+		return "failed";
+	}
+	pid = fork();
+	if (pid < 0) {
+		close(fds[0]);
+		close(fds[1]);
+		logmsg("fsck: %s: failed (fork)", dev);
+		return "failed";
+	}
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR);
+		dup2(fds[1], 1);
+		dup2(fds[1], 2);
+		if (null >= 0)
+			dup2(null, 0);
+		close(fds[0]);
+		close(fds[1]);
+		execv(argv[0], argv);
+		_exit(127);
+	}
+	close(fds[1]);
+	/* Read its output line by line, only for "Reclaimed N unused
+	   clusters (M bytes in K chains)." */
+	deadline = mono_now() + FSCK_TIMEOUT_S;
+	while (!eof) {
+		struct pollfd pfd;
+		ssize_t n, i;
+		int t = ms_until(deadline);
+		if (t == 0)
+			break;
+		pfd.fd = fds[0];
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		if (poll(&pfd, 1, t) <= 0)
+			continue;
+		n = read(fds[0], buf, sizeof buf);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0) {
+			eof = 1;
+			break;
+		}
+		for (i = 0; i < n; i++) {
+			if (buf[i] != '\n') {
+				if (len < sizeof cur - 1)
+					cur[len++] = buf[i];
+				continue;
+			}
+			cur[len] = '\0';
+			len = 0;
+			if (strncmp(cur, "Reclaimed ", 10) == 0)
+				sscanf(cur, "Reclaimed %15s unused cluster%*s (%23s bytes", nclus, nbytes);
+		}
+	}
+	close(fds[0]);
+	if (!eof)
+		kill(pid, SIGKILL);
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+	if (!eof) {
+		logmsg("fsck: %s: failed (timed out after %d s)", dev, FSCK_TIMEOUT_S);
+		return "failed";
+	}
+	rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+	if (rc == 0) {
+		logmsg("fsck: %s: clean", dev);
+		return "clean";
+	}
+	if (rc == 1) {
+		if (nclus[0])
+			logmsg("fsck: %s: repaired (reclaimed %s clusters, %s bytes)", dev, nclus, nbytes);
+		else
+			logmsg("fsck: %s: repaired", dev);
+		return "repaired";
+	}
+	logmsg("fsck: %s: failed (%d)", dev, rc);
+	return "failed";
+}
+
+/* Mount DEV, a FAT, as /media if it is ours (it has the modloop). It is
+   looked at read-only first, so nobody else's FAT (a Windows EFI
+   partition) is touched; ours is unmounted, checked, mounted read-write. */
+static int mount_our_fat(const char *dev)
+{
+	static const char opts[] = "flush,shortname=mixed,errors=continue";
+	const unsigned long flags = MS_NOATIME | MS_NODEV | MS_NOSUID;
+
+	if (mount(dev, MEDIA, "vfat", flags | MS_RDONLY, opts) != 0)
+		return 0;
+	if (!exists(MODLOOP_IMG)) {
+		umount2(MEDIA, MNT_DETACH);
+		return 0;
+	}
+	if (umount2(MEDIA, 0) == 0) {
+		splash_line("Checking the stick...");
+		stick_fsck = fat_check(dev);
+		if (mount(dev, MEDIA, "vfat", flags, opts) == 0)
+			return 1;
+		logmsg("media: cannot mount %s again: %s", dev, strerror(errno));
+		return 0;
+	}
+	/* still busy (cannot happen): use it as it is, unchecked */
+	logmsg("fsck: %s: skipped (busy)", dev);
+	return mount(dev, MEDIA, "vfat", flags | MS_REMOUNT, opts) == 0;
+}
+
 static int try_mount_media(const char *dev)
 {
-	static const char *const fstypes[] = { "vfat", "exfat", NULL };
-	int i;
-	for (i = 0; fstypes[i]; i++) {
-		const char *opts = i == 0 ? "flush,shortname=mixed,errors=continue" : "";
-		if (mount(dev, MEDIA, fstypes[i], MS_NOATIME | MS_NODEV | MS_NOSUID, opts) == 0) {
-			if (exists(MODLOOP_IMG)) {
-				logmsg("media: %s (%s)", dev, fstypes[i]);
-				return 1;
-			}
-			umount2(MEDIA, MNT_DETACH);
+	if (mount_our_fat(dev)) {
+		logmsg("media: %s (vfat)", dev);
+		return 1;
+	}
+	if (mount(dev, MEDIA, "exfat", MS_NOATIME | MS_NODEV | MS_NOSUID, "") == 0) {
+		if (exists(MODLOOP_IMG)) {
+			logmsg("media: %s (exfat)", dev);
+			return 1;
 		}
+		umount2(MEDIA, MNT_DETACH);
 	}
 	return 0;
 }
@@ -967,14 +1096,10 @@ static int mount_image_file(const char *img)
 	snprintf(part, sizeof part, "/dev/loop%dp1", num);
 	for (tries = 0; tries < 20 && !exists(part); tries++)
 		sleep_ms(50);
-	if (mount(part, MEDIA, "vfat", MS_NOATIME | MS_NODEV | MS_NOSUID,
-	          "flush,shortname=mixed,errors=continue") == 0) {
-		if (exists(MODLOOP_IMG)) {
-			image_loop = num;
-			snprintf(media_kind, sizeof media_kind, "image-file");
-			return 1;
-		}
-		umount2(MEDIA, MNT_DETACH);
+	if (mount_our_fat(part)) {
+		image_loop = num;
+		snprintf(media_kind, sizeof media_kind, "image-file");
+		return 1;
 	}
 	detach_loop(num);
 	return 0;
@@ -1278,6 +1403,7 @@ static void usb_mount(const char *name)
 	if (strcmp(type, "vfat") == 0) {
 		fstype = "vfat";
 		opts = "flush,shortname=mixed,errors=continue";
+		fat_check(dev); /* exfat and NTFS: no checker here */
 	}
 	else if (strcmp(type, "exfat") == 0)
 		fstype = "exfat";
@@ -2873,7 +2999,7 @@ static void cmd_status(int fd)
 	         ssh_pid > 0 ? "on" : "off",
 	         conf.rootpw[0] ? "set" : "none", efi_ok ? "yes" : "no", media_kind);
 	reply(fd, line);
-	snprintf(line, sizeof line, "usb %d\ninstallable %d\n", usb_count, install_count());
+	snprintf(line, sizeof line, "usb %d\ninstallable %d\nfsck %s\n", usb_count, install_count(), stick_fsck);
 	reply(fd, line);
 	if (image_dev[0]) {
 		/* loopback mode (atari.image): host device and the image's path on it */

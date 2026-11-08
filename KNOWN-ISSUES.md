@@ -23,6 +23,13 @@
 - **Old i3 (Broadwell) laptop**: blurry picture (firmware framebuffer, i915
   probably not taking over) and a firmware "self test" screen after one
   boot. No logs captured yet.
+- **Unclean stops** (power cut, the stick pulled, a hang): lost clusters
+  and a wrong free count on the stick's FAT used to pile up until copies
+  failed with "No space left" (one stick had 828 MB of them). init now
+  runs `fsck.fat -a` before mounting the stick (and every FAT USB drive),
+  so they are reclaimed at the next boot. A stick pulled while a file is
+  being written can still lose that file (fsck.fat reclaims its clusters
+  as free space, it does not bring the file back).
 - **Lid switch** does nothing yet (volume/brightness keys work).
 - **ZenBook UX425EA reports its battery as absent** (ACPI `BAT0` absent at
   boot), so the menu shows no battery level there. Not investigated.
