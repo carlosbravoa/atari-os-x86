@@ -36,8 +36,16 @@
 - **Clock**: laptops with a dead CMOS cell boot in 2016; init sets the time
   from the network once DHCP is up and writes it back to the RTC, but until
   then TLS (HTTPS hosts in FujiNet) fails.
-- **amdgpu firmware** makes the modloop ~400 MB; per-GPU trimming is
-  pending.
+- **Module archive** (modloop) is 194 MB after dropping Nvidia GSP and old
+  Intel Wi-Fi firmware and the driver classes below; AMD GPU firmware (26 MB)
+  is kept whole, per-GPU trimming is possible later.
+- **Drivers left out of the modloop** (to keep it small): no TV tuners,
+  DVB or capture cards, no FC/SAS/iSCSI host adapters or hardware RAID,
+  no cluster or network filesystems (NFS, Ceph, GFS2, ...), no datacenter
+  NICs (Mellanox, Intel ice/i40e/ixgbe, Broadcom bnxt, ...), no
+  InfiniBand, device-mapper/MD RAID, netfilter, IIO sensors
+  (accelerometers, ambient light; also the Cherry Trail AXP288 battery
+  gauge) or NFC. See "Building" in the README to put a class back.
 - **Installing onto the laptop's disk** (F8): Secure Boot must be off on
   UEFI machines (Limine is unsigned), as for the stick. The installer
   makes exactly one partition over the whole disk and erases everything

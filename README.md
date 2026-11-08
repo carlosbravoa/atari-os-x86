@@ -516,6 +516,19 @@ image, for the local scripts; older `build/atari-os-x86-*.img` are removed
 (`KEEP_OLD_IMAGES=1` keeps them). `DEV_SSH_KEY=0` leaves the developer key
 out (release images).
 
+The module archive (`modloop.sqfs`) leaves out drivers no old laptop
+loads: TV tuners, DVB and capture cards (UVC webcams stay), InfiniBand,
+RAID/LVM (`drivers/md`), FC/SAS/iSCSI host adapters, datacenter NICs
+(Mellanox, Intel ice/i40e/ixgbe, Broadcom bnxt/bnx2x, Chelsio, ...),
+cluster and network filesystems (NFS, Ceph, GFS2, OCFS2, 9p, ...), rare
+old filesystems (HFS, JFS, F2FS, ...), netfilter and traffic shaping, and
+virtualisation host drivers (Xen, vhost, VFIO); modules that need one of
+them go too. To get a class back, comment its line out of
+`MODLOOP_PRUNE` in step 3 of `scripts/mkimage.sh` and rebuild. The build
+fails if the prune would take a module the test ZenBook loads
+(`docs/specs/zenbook-modules.txt`), one init always loads, or one of the
+keep-list there (Wi-Fi, Ethernet, GPU, sound, laptop and input drivers).
+
 Write the image with `scripts/flash.sh build/atari-os.img` (see Install).
 Secure Boot must be disabled on UEFI machines.
 

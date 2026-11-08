@@ -451,11 +451,26 @@ static size_t hardware_lines(const char *status, char *page, size_t size)
 	return n;
 }
 
+/* An info screen holds 20 rows; with battery, image and FAT lines the
+   page can run longer, so it is shown in two screens when needed. */
 static void hardware_page(const char *status)
 {
-	static char page[2048];
-	hardware_lines(status, page, sizeof page);
-	UI_driver->fInfoScreen("Hardware", page);
+	static char page[2048], second[2048];
+	size_t n, i, lines = 0, cut = 0;
+	n = hardware_lines(status, page, sizeof page);
+	for (i = 0; i < n && page[i] != '\n'; i += strlen(page + i) + 1) {
+		if (++lines == 20)
+			cut = i + strlen(page + i) + 1; /* start of line 21 */
+	}
+	if (lines <= 20 || cut == 0) {
+		UI_driver->fInfoScreen("Hardware", page);
+		return;
+	}
+	memcpy(second, page + cut, n - cut + 1); /* the rest, with its '\n' end */
+	page[cut] = '\n';
+	page[cut + 1] = '\0';
+	UI_driver->fInfoScreen("Hardware (1/2)", page);
+	UI_driver->fInfoScreen("Hardware (2/2)", second);
 }
 
 /* ---- problem report ------------------------------------------------------ */

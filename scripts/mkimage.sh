@@ -253,6 +253,112 @@ log "initramfs modules: $(find "$INITRAMFS/lib/modules" -name '*.ko*' | wc -l),"
 ls -la "$BUILD/initramfs.zst"
 
 # ---- 3. modloop -----------------------------------------------------------
+# Kernel modules old laptops never load (docs/specs/modloop-2.md): paths
+# under modules/<kver>/kernel/, a directory or a module file without its
+# .ko.gz. Comment a line out (#) to get that class of drivers back. Modules
+# that depend on a pruned one go too; the build fails if anything the
+# ZenBook, init.c or the keep-list below needs would go.
+MODLOOP_PRUNE="
+# TV tuners, DVB, capture cards, camera sensors, IR receivers; kept: the
+# media core, CEC (the GPU drivers need it) and UVC webcams (the ZenBook
+# loads uvcvideo; snd-usb-audio needs mc)
+drivers/media/dvb-core drivers/media/dvb-frontends drivers/media/firewire
+drivers/media/i2c drivers/media/pci drivers/media/platform drivers/media/rc
+drivers/media/spi drivers/media/tuners drivers/media/radio drivers/media/mmc
+drivers/media/test-drivers drivers/media/common/b2c2 drivers/media/common/siano
+drivers/media/common/cx2341x drivers/media/common/cypress_firmware
+drivers/media/common/ttpci-eeprom drivers/media/common/tveeprom
+drivers/media/usb/b2c2 drivers/media/usb/cx231xx drivers/media/usb/dvb-usb
+drivers/media/usb/dvb-usb-v2 drivers/media/usb/em28xx drivers/media/usb/gspca
+drivers/media/usb/s2255 drivers/media/usb/ttusb-budget drivers/media/usb/ttusb-dec
+drivers/media/usb/usbtv
+# server, cluster and virtualisation host hardware; embedded buses (kept:
+# drivers/dca, igb needs it)
+drivers/infiniband drivers/md drivers/mtd drivers/iio drivers/xen drivers/vhost
+drivers/vfio drivers/vdpa drivers/ntb drivers/rapidio drivers/fpga drivers/greybus
+drivers/staging drivers/isdn drivers/atm drivers/uio drivers/accel drivers/crypto
+drivers/mailbox drivers/mcb drivers/siox drivers/slimbus drivers/target
+drivers/block/drbd drivers/block/nbd drivers/block/rbd drivers/block/pktcdvd
+# SAN/RAID host adapters (kept: sd_mod sr_mod sg st ch virtio_scsi, and
+# scsi_transport_fc, which Hyper-V's disk driver hv_storvsc needs; ses, the
+# enclosure services of disk shelves, goes with scsi_transport_sas)
+drivers/scsi/qla2xxx drivers/scsi/qla4xxx drivers/scsi/lpfc drivers/scsi/mpt3sas
+drivers/scsi/mpi3mr drivers/scsi/megaraid drivers/scsi/aacraid drivers/scsi/bfa
+drivers/scsi/csiostor drivers/scsi/be2iscsi drivers/scsi/fnic drivers/scsi/snic
+drivers/scsi/qedf drivers/scsi/qedi drivers/scsi/isci drivers/scsi/pm8001
+drivers/scsi/mvsas drivers/scsi/arcmsr drivers/scsi/aic7xxx drivers/scsi/aic94xx
+drivers/scsi/smartpqi drivers/scsi/hpsa drivers/scsi/cxgbi drivers/scsi/elx
+drivers/scsi/libfc drivers/scsi/fcoe drivers/scsi/libsas drivers/scsi/hisi_sas
+drivers/scsi/esas2r drivers/scsi/dpt_i2o drivers/scsi/sym53c8xx_2 drivers/scsi/3w-9xxx
+drivers/scsi/3w-sas drivers/scsi/3w-xxxx drivers/scsi/advansys drivers/scsi/hptiop
+drivers/scsi/initio drivers/scsi/ipr drivers/scsi/ips drivers/scsi/myrb drivers/scsi/myrs
+drivers/scsi/stex drivers/scsi/wd719x drivers/scsi/fdomain drivers/scsi/qlogicfas408
+drivers/scsi/qla1280 drivers/scsi/dc395x drivers/scsi/am53c974 drivers/scsi/BusLogic
+drivers/scsi/a100u2w drivers/scsi/atp870u drivers/scsi/vmw_pvscsi
+drivers/scsi/scsi_transport_sas
+drivers/scsi/scsi_transport_iscsi drivers/scsi/iscsi_tcp drivers/scsi/libiscsi
+drivers/scsi/libiscsi_tcp
+# datacenter NICs (kept: the consumer ethernet, wireless, USB network adapters)
+drivers/net/ethernet/mellanox drivers/net/ethernet/intel/ice drivers/net/ethernet/intel/i40e
+drivers/net/ethernet/intel/iavf drivers/net/ethernet/intel/fm10k drivers/net/ethernet/intel/ixgbe
+drivers/net/ethernet/intel/ixgbevf drivers/net/ethernet/intel/idpf
+drivers/net/ethernet/broadcom/bnxt drivers/net/ethernet/broadcom/bnx2x
+drivers/net/ethernet/chelsio drivers/net/ethernet/qlogic drivers/net/ethernet/cavium
+drivers/net/ethernet/netronome drivers/net/ethernet/emulex drivers/net/ethernet/solarflare
+drivers/net/ethernet/huawei drivers/net/ethernet/pensando drivers/net/ethernet/fungible
+drivers/net/ethernet/microsoft drivers/net/ethernet/wangxun drivers/net/ethernet/amd/xgbe
+drivers/net/ethernet/amd/pds_core drivers/net/ethernet/sfc drivers/net/ethernet/brocade
+drivers/net/ethernet/cisco drivers/net/ethernet/myricom drivers/net/ethernet/neterion
+drivers/net/ethernet/tehuti drivers/net/ethernet/renesas
+drivers/net/fddi drivers/net/hippi drivers/net/wan drivers/net/hamradio drivers/net/ieee802154
+drivers/net/can drivers/net/arcnet drivers/net/plip drivers/net/team drivers/net/bonding
+drivers/net/ipvlan drivers/net/macvlan drivers/net/ppp drivers/net/slip
+# cluster, network and exotic filesystems (kept: ext4 btrfs xfs fat exfat
+# ntfs3 isofs udf squashfs fuse overlayfs smb and the rest)
+fs/ocfs2 fs/gfs2 fs/dlm fs/ceph fs/nfs fs/nfsd fs/nfs_common fs/lockd fs/afs fs/orangefs
+fs/9p fs/coda fs/ubifs fs/jffs2 fs/nilfs2 fs/reiserfs fs/ufs fs/minix fs/bfs fs/qnx4
+fs/qnx6 fs/omfs fs/befs fs/adfs fs/affs fs/efs fs/freevxfs fs/sysv fs/hpfs fs/hfs
+fs/hfsplus fs/jfs fs/cramfs fs/romfs fs/zonefs fs/bcachefs fs/erofs fs/f2fs
+# firewall, traffic shaping and server/cluster network protocols
+net/netfilter net/ipv4/netfilter net/ipv6/netfilter net/bridge/netfilter net/sched
+net/dccp net/sctp net/rds net/tipc net/batman-adv net/openvswitch net/mpls net/nsh
+net/l2tp net/caif net/ceph net/can net/ieee802154 net/6lowpan net/mac802154 net/nfc
+net/rxrpc net/smc net/sunrpc
+"
+# Must survive the prune (section C of the spec): what init.c always loads
+# (base_modules[] in init/init.c; keep this in step with it), the
+# initramfs's set, and drivers for laptops in the wild. The 182 modules the
+# test ZenBook loads are read from docs/specs/zenbook-modules.txt.
+MODLOOP_BASE_MODULES="evdev loop squashfs vfat exfat ntfs3 nls_cp437 nls_iso8859-1
+	nls_utf8 usb-storage uas sd_mod button af_packet coretemp k10temp"
+MODLOOP_KEEP="ath9k ath10k_pci ath11k_pci ath5k rtw88_pci rtw88_8822be rtw88_8822ce
+	rtw89_pci rtl8xxxu rtl8192ce rtl8192cu rtl8188ee rtl8723be rtl8821ae rt2800pci
+	rt2800usb brcmfmac brcmsmac b43 b43legacy mt76x2e mt7921e mt7925e iwlwifi iwlmvm
+	iwldvm iwl3945 iwl4965 ipw2200 r8169 e1000e e1000 igb igc tg3 b44 sky2 skge
+	atl1c atl1e atl1 alx forcedeth via_rhine via_velocity jme r8152 asix
+	ax88179_178a cdc_ether rndis_host radeon amdgpu nouveau i915 xe
+	snd_hda_intel snd_hda_codec_realtek snd_hda_codec_conexant
+	snd_hda_codec_hdmi snd_hda_codec_idt snd_hda_codec_sigmatel
+	snd_hda_codec_via snd_hda_codec_cirrus snd_sof_pci_intel_tgl
+	snd_sof_pci_intel_cnl snd_sof_pci_intel_apl snd_sof_pci_intel_icl
+	snd_sof_pci_intel_mtl snd_sof_pci_intel_lnl snd_sof_amd_renoir
+	snd_sof_amd_rembrandt snd_acp3x_pdm_dma snd_intel8x0 snd_ens1371
+	snd_usb_audio usb_storage uas sdhci sdhci_pci rtsx_pci rtsx_pci_sdmmc
+	rtsx_usb rtsx_usb_sdmmc mmc_block memstick thinkpad_acpi asus_wmi
+	asus_nb_wmi dell_laptop dell_wmi hp_wmi ideapad_laptop acer_wmi
+	samsung_laptop toshiba_acpi sony_laptop fujitsu_laptop msi_wmi
+	lg_laptop panasonic_laptop xpad joydev hid_sony hid_microsoft hid_logitech
+	hid_logitech_dj hid_nintendo hid_playstation hid_steam hid_multitouch
+	i2c_hid i2c_hid_acpi psmouse synaptics_usb elan_i2c atkbd coretemp
+	k10temp k8temp fam15h_power acpi_cpufreq intel_pstate
+	processor_thermal_device pcc_cpufreq btusb btintel btrtl
+	btbcm ath3k usbhid hid_generic evdev uinput loop squashfs vfat
+	exfat ntfs3 ext4 btrfs xfs nvme ahci ata_piix pata_acpi nls_cp437
+	nls_iso8859_1 nls_utf8 nls_cp850 nls_cp1252 efivarfs efi_pstore
+	firewire_ohci firewire_sbp2 ohci_pci ehci_pci xhci_pci uhci_hcd
+	pcspkr cdc_acm ftdi_sio pl2303 cp210x ch341 usbserial
+	$INITRAMFS_MODULES $LOOPBACK_FS_MODULES"
+
 log "Building modloop (modules + firmware)"
 rm -rf "$BUILD/modloop"
 mkdir -p "$BUILD/modloop/modules" "$BUILD/modloop/firmware"
@@ -273,6 +379,93 @@ if [ -d "$BUILD/modloop/firmware/intel/iwlwifi" ]; then
 fi
 find "$BUILD/modloop/firmware" -type l | while read -r l; do [ -e "$l" ] || rm -f "$l"; done  # dangling symlinks (busybox find has no -xtype)
 log "modloop firmware: $(du -sm "$BUILD/modloop/firmware" | cut -f1) MB"
+# Prune the modules (MODLOOP_PRUNE above). $STAGE keeps the full set: its
+# modules.dep is the reference for what depends on what.
+MODS=$BUILD/modloop/modules/$KVER
+ODEP=$STAGE/lib/modules/$KVER/modules.dep
+mods_mb() { du -sm "$MODS" | cut -f1; }
+mods_count() { find "$MODS/kernel" -name '*.ko*' | wc -l; }
+before_mb=$(mods_mb); before_n=$(mods_count)
+absent=""
+for p in $(printf '%s\n' "$MODLOOP_PRUNE" | sed 's/#.*//'); do
+	found=0
+	[ -d "$MODS/kernel/$p" ] && { rm -rf "$MODS/kernel/$p"; found=1; }
+	for f in "$MODS/kernel/$p".ko*; do [ -f "$f" ] && { rm -f "$f"; found=1; }; done
+	[ $found = 1 ] || absent="$absent $p"
+done
+[ -n "$absent" ] && log "modloop prune: not in this kernel:$absent"
+# Modules that need a pruned one (per the original modules.dep) go too,
+# until nothing is left that depends on a missing module.
+(cd "$MODS" && find kernel -name '*.ko*') > "$BUILD/modloop-present"
+awk -F': *' 'NR == FNR { have[$0] = 1; next }
+	$1 in have { mods[$1] = $2 }
+	END {
+		do {
+			changed = 0
+			for (m in mods) {
+				if (!(m in have)) continue
+				n = split(mods[m], d, " ")
+				for (i = 1; i <= n; i++) if (!(d[i] in have)) { delete have[m]; print m; changed = 1; break }
+			}
+		} while (changed)
+	}' "$BUILD/modloop-present" "$ODEP" > "$BUILD/modloop-orphans"
+(cd "$MODS" && xargs -r rm -f < "$BUILD/modloop-orphans")
+[ -s "$BUILD/modloop-orphans" ] && log "modloop prune: $(wc -l < "$BUILD/modloop-orphans") modules depending on pruned ones removed too:" \
+	"$(sed 's|.*/||; s|\.ko.*||' "$BUILD/modloop-orphans" | sort | tr '\n' ' ')"
+find "$MODS/kernel" -depth -type d -exec rmdir {} + 2>/dev/null || true  # the emptied ones
+# Regenerate modules.dep/alias/symbols/... for the pruned tree (depmod wants
+# <base>/lib/modules/<kver>, so the tree is moved under a temp base for it).
+modname() { sed 's|.*/||; s|\.ko.*||; s|-|_|g'; }
+(cd "$MODS" && find kernel -name '*.ko*' | sed 's|\.ko\..*|.ko|') | sort > "$BUILD/modloop-present"
+awk 'NR == FNR { have[$0] = 1; next } $0 in have' "$BUILD/modloop-present" \
+	"$STAGE/lib/modules/$KVER/modules.order" > "$MODS/modules.order"
+rm -f "$MODS"/modules.*.bin
+rm -rf "$BUILD/depmod-base"
+mkdir -p "$BUILD/depmod-base/lib/modules"
+mv "$MODS" "$BUILD/depmod-base/lib/modules/$KVER"
+# (its complaint about the vmlinuz symlink, dangling here, is filtered out)
+depmod -b "$BUILD/depmod-base" "$KVER" 2> "$BUILD/depmod.err" \
+	|| { cat "$BUILD/depmod.err" >&2; mv "$BUILD/depmod-base/lib/modules/$KVER" "$MODS"; die "depmod failed"; }
+grep -v 'fstatat(.*vmlinuz)' "$BUILD/depmod.err" >&2 || true
+rm -f "$BUILD/depmod.err"
+mv "$BUILD/depmod-base/lib/modules/$KVER" "$MODS"
+rm -rf "$BUILD/depmod-base"
+# Safety check (spec section C): the ZenBook's modules, init.c's
+# base_modules[] and the keep-list must still be there, each with all its
+# dependencies. Names compare with '-' and '_' as equal (like modprobe).
+# Every remaining module must keep exactly its old dependencies (a module
+# that lost one would fail with "Unknown symbol").
+modloop_names() { sed 's|^\([^:]*\):.*|\1|' "$1" | modname | sort -u; }
+modloop_names "$ODEP" > "$BUILD/modloop-names-before"
+modloop_names "$MODS/modules.dep" > "$BUILD/modloop-names-after"
+fail=""; unknown=""
+check_names() { # strict: 1 = must exist even before the prune
+	strict=$1; shift
+	for m in $(printf '%s\n' "$@" | modname); do
+		grep -qx "$m" "$BUILD/modloop-names-after" && continue
+		if grep -qx "$m" "$BUILD/modloop-names-before" || [ "$strict" = 1 ]; then
+			fail="$fail $m"
+		else
+			unknown="$unknown $m"
+		fi
+	done
+}
+[ -f "$WORK/docs/specs/zenbook-modules.txt" ] || die "docs/specs/zenbook-modules.txt missing"
+check_names 1 $(cat "$WORK/docs/specs/zenbook-modules.txt")
+check_names 1 $MODLOOP_BASE_MODULES
+check_names 0 $MODLOOP_KEEP
+[ -n "$unknown" ] && log "modloop keep-list: not in this kernel (built in or not configured):$(printf '%s\n' $unknown | sort -u | tr '\n' ' ')"
+[ -z "$fail" ] || die "modloop prune removes modules that must stay:$(printf '%s\n' $fail | sort -u | tr '\n' ' ')"
+awk -F': *' '{ n = split($2, d, " "); for (i = 1; i <= n; i++) print d[i] }' "$MODS/modules.dep" | sort -u \
+	| while read -r d; do [ -f "$MODS/$d" ] || echo "$d"; done > "$BUILD/modloop-missing"
+[ -s "$BUILD/modloop-missing" ] && die "modloop modules.dep lists missing files: $(tr '\n' ' ' < "$BUILD/modloop-missing")"
+deppairs() { awk -F': *' '{ print $1; n = split($2, d, " "); for (i = 1; i <= n; i++) print $1 " " d[i] }' "$1" | sort; }
+deppairs "$MODS/modules.dep" > "$BUILD/modloop-deps-after"
+deppairs "$ODEP" | awk 'NR == FNR { if (!index($0, " ")) have[$0] = 1; next } $1 in have' "$BUILD/modloop-deps-after" - > "$BUILD/modloop-deps-before"
+cmp -s "$BUILD/modloop-deps-before" "$BUILD/modloop-deps-after" \
+	|| die "modloop prune changed module dependencies: $(diff "$BUILD/modloop-deps-before" "$BUILD/modloop-deps-after" | head -20)"
+rm -f "$BUILD"/modloop-present "$BUILD"/modloop-orphans "$BUILD"/modloop-names-* "$BUILD"/modloop-missing "$BUILD"/modloop-deps-*
+log "modloop modules: $before_mb -> $(mods_mb) MB ($before_n -> $(mods_count) modules)"
 rm -f "$BUILD/modloop.sqfs"
 mksquashfs "$BUILD/modloop" "$BUILD/modloop.sqfs" -comp zstd -Xcompression-level 15 -all-root -no-progress -quiet
 ls -la "$BUILD/modloop.sqfs"

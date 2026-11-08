@@ -858,6 +858,25 @@ static const char *fat_check(const char *dev)
 	return "failed";
 }
 
+/* The FAT "dirty" flag from the boot sector: bit 0 of byte 0x41 on
+   FAT32 (the FAT12/16 field is 0x25), set while mounted read-write and
+   cleared by a clean unmount. 1 when set or unreadable (check it then). */
+static int fat_dirty(const char *dev)
+{
+	unsigned char bs[512];
+	int fd = open(dev, O_RDONLY | O_CLOEXEC);
+	ssize_t n;
+	int fat32;
+	if (fd < 0)
+		return 1;
+	n = pread(fd, bs, sizeof bs, 0);
+	close(fd);
+	if (n != (ssize_t)sizeof bs)
+		return 1;
+	fat32 = bs[0x16] == 0 && bs[0x17] == 0; /* FAT16 sectors-per-FAT is 0 on FAT32 */
+	return fat32 ? (bs[0x41] & 1) != 0 : (bs[0x25] & 1) != 0;
+}
+
 /* Mount DEV, a FAT, as /media if it is ours (it has the modloop). It is
    looked at read-only first, so nobody else's FAT (a Windows EFI
    partition) is touched; ours is unmounted, checked, mounted read-write. */
@@ -1403,7 +1422,14 @@ static void usb_mount(const char *name)
 	if (strcmp(type, "vfat") == 0) {
 		fstype = "vfat";
 		opts = "flush,shortname=mixed,errors=continue";
-		fat_check(dev); /* exfat and NTFS: no checker here */
+		/* only a drive that was not unmounted cleanly (dirty bit) is
+		   checked: a clean one has no lost clusters, and fsck of a big
+		   FAT32 drive would hold init for seconds. exfat and NTFS: no
+		   checker here */
+		if (fat_dirty(dev))
+			fat_check(dev);
+		else
+			logmsg("fsck: %s: clean (not dirty, skipped)", dev);
 	}
 	else if (strcmp(type, "exfat") == 0)
 		fstype = "exfat";
