@@ -716,5 +716,8 @@ the Altirra core, i686 netbooks; see KNOWN-ISSUES.md.
 
 ## Licence
 
-GPL-2.0-or-later. atari800 is GPL-2.0-or-later; Limine is BSD-2-Clause;
-firmware files carry their own licences (see `linux-firmware`).
+GPL-2.0-or-later (see `LICENSE`). atari800 is GPL-2.0-or-later and our
+emulator code is built into it; FujiNet-PC (GPL-3.0) runs as a separate
+program and ships with its source as a submodule; Limine is BSD-2-Clause;
+the Linux kernel GPL-2.0; the AltirraOS ROMs are Avery Lee's; firmware
+files carry their own licences (see `linux-firmware`).
