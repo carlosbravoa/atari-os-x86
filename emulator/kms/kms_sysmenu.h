@@ -34,7 +34,7 @@ const char *KMS_SYSMENU_Version(void);
 void KMS_SYSMENU_HotKey(int keycode);
 void KMS_SYSMENU_ApplySettings(void); /* after sound/video init */
 
-/* Low latency (F8 > Controls, KMS_LOW_LATENCY, default on): the frame
+/* Low latency (F8 > Controls, KMS_LOW_LATENCY, default off, opt-in): the frame
    waits for the vblank before it reads the input (kms/main.c), the sound
    card runs 10 ms periods x 4, the main thread is SCHED_FIFO 10 with its
    memory locked and 50 us timer slack, and init runs the CPU at

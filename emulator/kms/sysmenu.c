@@ -73,7 +73,7 @@ int KMS_SYSMENU_brightness = -1;
 int KMS_SYSMENU_hint_done = FALSE;
 int KMS_SYSMENU_advanced_open = FALSE;
 int KMS_SYSMENU_reopen = FALSE;
-int KMS_SYSMENU_low_latency = TRUE;
+int KMS_SYSMENU_low_latency = FALSE; /* opt-in: fast CPU mode, FIFO, small audio buffer */
 
 /* ---- talking to PID 1 ------------------------------------------------ */
 

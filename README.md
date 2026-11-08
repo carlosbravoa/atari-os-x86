@@ -323,7 +323,7 @@ with it too, and the Hardware page shows it as "Version".
   says) or Atari (positional: the PC key in the place of an Atari key
   types that key, so Shift+2 is `"`, Shift+8 `@`, `-` is `<`, `=` `>`,
   `[` `-`, `]` `=`, `'` `+`, `\` `*`; the Help page shows the table);
-  **Low latency** on (default) or off (see "Input lag" below);
+  **Low latency** off (default) or on (see "Input lag" below);
   **Gamepad 1 drives** joystick 0 or 1 (swaps the first two gamepads;
   menus follow the first); **Gamepad buttons** (the mapping). Live and
   saved (`KMS_ARROWS_JOYSTICK`, `KMS_KEYBOARD=pc|atari`,
@@ -405,7 +405,7 @@ card's underruns. What is not in the number: the USB polling before the
 kernel sees the event (1 ms now, see below) and the panel's own scan-out
 and response time.
 
-**Low latency** (F8 > Controls, on by default, `KMS_LOW_LATENCY`):
+**Low latency** (F8 > Controls, off by default: an opt-in, since it keeps the CPU in its fast power mode; `KMS_LOW_LATENCY`):
 
 - each frame waits for the previous frame's vblank first, then reads the
   input, emulates and queues its flip, so it is on screen one vblank later
