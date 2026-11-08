@@ -118,6 +118,7 @@ static UI_tMenuItem items[MAX_LINES + 1];
 static char rows[24][LINE_MAX_W + 1]; /* the keyboard type block */
 static char inverse[4][LINE_MAX_W + 1]; /* '!' lines, bit 7 set */
 static int n_items, n_inverse;
+static int first_sel = -1; /* retval of the first line the cursor can sit on */
 
 static void add_line(const char *text)
 {
@@ -139,6 +140,8 @@ static void add_line(const char *text)
 	else
 		m->item = (char *)(text[0] == '#' || text[0] == '!' ? text + 1 : text);
 	m->suffix = NULL;
+	if (m->retval >= 0 && first_sel < 0)
+		first_sel = m->retval;
 	n_items++;
 }
 
@@ -166,9 +169,13 @@ static void add_keyboard_block(void)
 
 static void build(void)
 {
+	static char version_line[48];
 	size_t i;
 	n_items = 0;
 	n_inverse = 0;
+	first_sel = -1;
+	snprintf(version_line, sizeof version_line, "#atari-os-x86 %.24s", KMS_SYSMENU_Version());
+	add_line(version_line);
 	for (i = 0; help_lines[i] != NULL; i++) {
 		if (strcmp(help_lines[i], "@KEYBOARD") == 0)
 			add_keyboard_block();
@@ -212,7 +219,7 @@ void KMS_HELP_Run(void)
 {
 	int was_active = UI_is_active;
 	int owner = KMS_INPUT_menu_owner;
-	int sel = 1;
+	int sel;
 
 	if (!was_active) {
 		UI_is_active = TRUE;
@@ -223,6 +230,7 @@ void KMS_HELP_Run(void)
 	Log_print("help: open");
 
 	build();
+	sel = first_sel;
 	/* RETURN on a line does nothing; arrows scroll; Esc (or F1, which
 	   the input layer turns into Esc) closes */
 	for (;;) {

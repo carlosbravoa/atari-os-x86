@@ -27,6 +27,9 @@ void KMS_SYSMENU_Run(void);
 /* F1, F8 or F9 was opened: the boot hint ("F1 = Help ...") goes and does
    not come back (KMS_HINT_DONE). */
 void KMS_SYSMENU_HintSeen(void);
+/* The build this stick runs (init's VERSION: git describe, e.g. "v0.2-3-g724be30"
+   or a bare hash), "?" until init answers. Shown at the foot of the menus. */
+const char *KMS_SYSMENU_Version(void);
 /* Volume/brightness hotkeys (evdev KEY_* codes). */
 void KMS_SYSMENU_HotKey(int keycode);
 void KMS_SYSMENU_ApplySettings(void); /* after sound/video init */

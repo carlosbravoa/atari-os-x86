@@ -270,7 +270,13 @@ Reboot laptop   (UEFI: straight back into Atari, or normal)
 Shut down
 Advanced: emulator menu...
 Back to Atari                   Esc
+
+atari-os-x86 <version>
 ```
+
+The last line is the build the stick runs (`git describe`: a tag plus the
+commits since it and the hash, or the bare hash); the Help list starts
+with it too, and the Hardware page shows it as "Version".
 
 - **Library**: the F9 Library
 - **Boot into**: BASIC, No BASIC (the XL self test, as when holding

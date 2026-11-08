@@ -272,6 +272,19 @@ void KMS_SYSMENU_ApplySettings(void)
 	}
 }
 
+const char *KMS_SYSMENU_Version(void)
+{
+	static char version[40] = "";
+	if (!version[0]) {
+		char status[1024];
+		if (ctl_request("status", status, sizeof status))
+			status_get(status, "version", version, sizeof version, "?");
+		else
+			return "?"; /* ask again next time */
+	}
+	return version;
+}
+
 void KMS_SYSMENU_HintSeen(void)
 {
 	if (!KMS_SYSMENU_hint_done) {
@@ -1304,7 +1317,7 @@ static void ui_back(void)
 
 void KMS_SYSMENU_Run(void)
 {
-	static char boot_item[48], eject_item[48], vol_item[32], net_item[48], reboot_item[48];
+	static char boot_item[48], eject_item[48], vol_item[32], net_item[48], reboot_item[48], ver_item[48];
 	int option = 1;
 	int done = FALSE;
 	int owner = KMS_INPUT_menu_owner;
@@ -1336,6 +1349,8 @@ void KMS_SYSMENU_Run(void)
 			UI_MENU_ACTION(14, "Shut down"),
 			UI_MENU_SUBMENU(15, "Advanced: emulator menu..."),
 			UI_MENU_ACTION_ACCEL(16, "Back to Atari", "Esc"),
+			UI_MENU_LABEL(""),
+			UI_MENU_LABEL(ver_item),
 			UI_MENU_END
 		};
 		int efi, i;
@@ -1364,6 +1379,7 @@ void KMS_SYSMENU_Run(void)
 		else
 			snprintf(vol_item, sizeof vol_item, "Sound: no sound card");
 		network_label(status, net_item, sizeof net_item);
+		snprintf(ver_item, sizeof ver_item, "atari-os-x86 %.24s", KMS_SYSMENU_Version());
 		efi = strcmp(status_get(status, "efi", buf, sizeof buf, "no"), "yes") == 0;
 		/* on UEFI a popup asks: straight back here (BootNext) or normal */
 		Util_strlcpy(reboot_item, efi ? "Reboot laptop..." : "Reboot laptop", sizeof reboot_item);
