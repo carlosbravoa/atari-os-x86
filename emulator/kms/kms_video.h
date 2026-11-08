@@ -21,10 +21,23 @@
 enum {
 	KMS_SCALE_INTEGER, /* largest integer factor that fits, same on both axes (default) */
 	KMS_SCALE_FIT,     /* fill the height, 4:3 width (Atari pixel shape kept), fractional */
-	KMS_SCALE_STRETCH  /* fill the whole panel ("Fill") */
+	KMS_SCALE_STRETCH, /* fill the whole panel ("Fill") */
+	KMS_SCALE_FREE     /* KMS_VIDEO_free_x by KMS_VIDEO_free_y, clipped to the panel */
 };
 
 extern int KMS_VIDEO_scale_mode;
+/* Free scaling factors (KMS_SCALE_X/KMS_SCALE_Y in the config). */
+extern double KMS_VIDEO_free_x;
+extern double KMS_VIDEO_free_y;
+/* The factors of the current layout (picture size / source size), 0
+   before Initialise. */
+double KMS_VIDEO_ScaleX(void);
+double KMS_VIDEO_ScaleY(void);
+/* The largest factor that fits the panel on one axis (for the source
+   width the borders give now). */
+double KMS_VIDEO_FreeMax(int vertical);
+/* "3 x 3" (Integer) or "3.18 x 3.33" into BUF. */
+void KMS_VIDEO_ScaleFactors(char *buf, size_t size);
 
 /* Display options (F8 > Display), KMS_SMOOTH/KMS_SCANLINES/KMS_BORDERS in
    the config. Call KMS_VIDEO_Relayout() after changing one. */
@@ -41,7 +54,18 @@ int KMS_VIDEO_ScanlinesPossible(void);
    (FALSE) on PAL. */
 int KMS_VIDEO_NtscLook(void);
 int KMS_VIDEO_SetNtscLook(int on);
-/* "Integer"/"Fit"/"Fill" and "Off"/"Light"/"Medium"/"Strong" */
+/* The filter's preset, recognised from its resolution/artifacts/fringing/
+   bleed (saved by atari800 as FILTER_NTSC_*): KMS_NTSC_* or KMS_NTSC_CUSTOM. */
+enum { KMS_NTSC_COMPOSITE, KMS_NTSC_SVIDEO, KMS_NTSC_RGB, KMS_NTSC_MONOCHROME, KMS_NTSC_CUSTOM };
+int KMS_VIDEO_NtscPreset(void);
+const char *KMS_VIDEO_NtscPresetLabel(void); /* "Composite", "S-Video", ... */
+/* Load a preset's filter knobs (not the colour controls) and turn the TV
+   look on; FALSE on PAL. */
+int KMS_VIDEO_SetNtscPreset(int preset);
+/* The filter's sharpness, -1.0 .. 1.0 (FILTER_NTSC_SHARPNESS), applied at once. */
+double KMS_VIDEO_NtscSharpness(void);
+void KMS_VIDEO_SetNtscSharpness(double s);
+/* "Integer"/"Fit"/"Fill"/"Free" and "Off"/"Light"/"Medium"/"Strong" */
 const char *KMS_VIDEO_ScaleLabel(void);
 const char *KMS_VIDEO_ScanlinesLabel(void);
 /* Preferred DRM node ("" = probe /dev/dri/card*). */

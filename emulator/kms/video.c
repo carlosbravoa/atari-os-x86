@@ -10,7 +10,7 @@
  * with a vsync'd page flip. No GPU driver userspace (Mesa) is needed, so
  * this works on every KMS driver including simpledrm.
  *
- * Display options (F8 > Display): scaling Integer/Fit/Fill, smoothing
+ * Display options (F8 > Display): scaling Integer/Fit/Fill/Free, smoothing
  * (sharp-bilinear for Fit/Fill: each Atari pixel stays a solid block and
  * only the panel pixels on its edges are blended), scanlines (every
  * second panel row of an Atari line darker, from a second palette),
@@ -41,6 +41,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -73,6 +74,8 @@
 #endif
 
 int KMS_VIDEO_scale_mode = KMS_SCALE_INTEGER;
+double KMS_VIDEO_free_x = 3.0;
+double KMS_VIDEO_free_y = 3.0;
 int KMS_VIDEO_smooth = FALSE;
 int KMS_VIDEO_scanlines = KMS_SCANLINES_OFF;
 int KMS_VIDEO_borders = KMS_BORDERS_TV;
@@ -469,7 +472,7 @@ static void pacing_check(void)
 
 /* ---- scaling layout -------------------------------------------------- */
 
-static const char *const scale_names[] = { "integer", "fit", "fill" };
+static const char *const scale_names[] = { "integer", "fit", "fill", "free" };
 static const char *const scan_names[] = { "off", "light", "medium", "strong" };
 static const char *const border_names[] = { "full", "tv", "tight" };
 
@@ -563,6 +566,15 @@ static void compute_layout(void)
 			dst_w = W;
 			dst_h = (int)((double)W * 3 * 336 / (4.0 * sw) + 0.5);
 		}
+		break;
+	case KMS_SCALE_FREE:
+		/* the user's factors, centred and clipped to the panel */
+		dst_w = (int)(sw * KMS_VIDEO_free_x + 0.5);
+		dst_h = (int)(sh * KMS_VIDEO_free_y + 0.5);
+		if (dst_w < 1) dst_w = 1;
+		if (dst_h < 1) dst_h = 1;
+		if (dst_w > W) dst_w = W;
+		if (dst_h > H) dst_h = H;
 		break;
 	case KMS_SCALE_INTEGER:
 	default: {
@@ -691,10 +703,120 @@ int KMS_VIDEO_SetNtscLook(int on)
 #endif
 }
 
+#ifdef NTSC_FILTER
+static atari_ntsc_setup_t const *const ntsc_presets[] = {
+	&atari_ntsc_composite, &atari_ntsc_svideo, &atari_ntsc_rgb, &atari_ntsc_monochrome
+};
+#endif
+
+int KMS_VIDEO_NtscPreset(void)
+{
+#ifdef NTSC_FILTER
+	/* the knobs that tell the presets apart; sharpness is the user's */
+	int i;
+	for (i = 0; i < 4; i++) {
+		const atari_ntsc_setup_t *p = ntsc_presets[i];
+		if (Util_almostequal(FILTER_NTSC_setup.resolution, p->resolution, 0.001) &&
+		    Util_almostequal(FILTER_NTSC_setup.artifacts, p->artifacts, 0.001) &&
+		    Util_almostequal(FILTER_NTSC_setup.fringing, p->fringing, 0.001) &&
+		    Util_almostequal(FILTER_NTSC_setup.bleed, p->bleed, 0.001))
+			return i;
+	}
+#endif
+	return KMS_NTSC_CUSTOM;
+}
+
+const char *KMS_VIDEO_NtscPresetLabel(void)
+{
+	static const char *const labels[] = { "Composite", "S-Video", "RGB", "Monochrome", "Custom" };
+	return labels[KMS_VIDEO_NtscPreset()];
+}
+
+static void ntsc_refilter(void)
+{
+#ifdef NTSC_FILTER
+	if (FILTER_NTSC_emu != NULL)
+		FILTER_NTSC_Update(FILTER_NTSC_emu);
+#endif
+}
+
+int KMS_VIDEO_SetNtscPreset(int preset)
+{
+#ifdef NTSC_FILTER
+	const atari_ntsc_setup_t *p;
+	if (Atari800_tv_mode != Atari800_TV_NTSC || preset < 0 || preset >= KMS_NTSC_CUSTOM)
+		return FALSE;
+	/* only the filter's knobs: FILTER_NTSC_SetPreset would also reset the
+	   colour controls (hue, saturation, ...) the Crisp picture uses */
+	p = ntsc_presets[preset];
+	FILTER_NTSC_setup.sharpness = p->sharpness;
+	FILTER_NTSC_setup.resolution = p->resolution;
+	FILTER_NTSC_setup.artifacts = p->artifacts;
+	FILTER_NTSC_setup.fringing = p->fringing;
+	FILTER_NTSC_setup.bleed = p->bleed;
+	ntsc_refilter();
+	if (ARTIFACT_mode != ARTIFACT_NTSC_FULL)
+		ARTIFACT_Set(ARTIFACT_NTSC_FULL);
+	KMS_VIDEO_Relayout();
+	return TRUE;
+#else
+	(void)preset;
+	return FALSE;
+#endif
+}
+
+double KMS_VIDEO_NtscSharpness(void)
+{
+#ifdef NTSC_FILTER
+	return FILTER_NTSC_setup.sharpness;
+#else
+	return 0.0;
+#endif
+}
+
+void KMS_VIDEO_SetNtscSharpness(double s)
+{
+#ifdef NTSC_FILTER
+	if (s < FILTER_NTSC_SHARPNESS_MIN) s = FILTER_NTSC_SHARPNESS_MIN;
+	if (s > FILTER_NTSC_SHARPNESS_MAX) s = FILTER_NTSC_SHARPNESS_MAX;
+	FILTER_NTSC_setup.sharpness = s;
+	ntsc_refilter();
+#else
+	(void)s;
+#endif
+}
+
 const char *KMS_VIDEO_ScaleLabel(void)
 {
-	static const char *const labels[] = { "Integer", "Fit", "Fill" };
-	return labels[KMS_VIDEO_scale_mode >= 0 && KMS_VIDEO_scale_mode <= 2 ? KMS_VIDEO_scale_mode : 0];
+	static const char *const labels[] = { "Integer", "Fit", "Fill", "Free" };
+	return labels[KMS_VIDEO_scale_mode >= 0 && KMS_VIDEO_scale_mode <= 3 ? KMS_VIDEO_scale_mode : 0];
+}
+
+double KMS_VIDEO_ScaleX(void)
+{
+	return drm_fd >= 0 && lay_sw > 0 ? (double)dst_w / lay_sw : 0.0;
+}
+
+double KMS_VIDEO_ScaleY(void)
+{
+	return drm_fd >= 0 && lay_sh > 0 ? (double)dst_h / lay_sh : 0.0;
+}
+
+double KMS_VIDEO_FreeMax(int vertical)
+{
+	int sw = Screen_visible_x2 - Screen_visible_x1, sh = Screen_visible_y2 - Screen_visible_y1;
+	if (drm_fd < 0 || sw <= 0 || sh <= 0)
+		return 1.0;
+	return vertical ? (double)mode.vdisplay / sh : (double)mode.hdisplay / sw;
+}
+
+void KMS_VIDEO_ScaleFactors(char *buf, size_t size)
+{
+	if (KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER && lay_sw > 0 && lay_sh > 0
+	    && dst_w % lay_sw == 0 && dst_h % lay_sh == 0)
+		snprintf(buf, size, "%d x %d", dst_w / lay_sw, dst_h / lay_sh);
+	else
+		snprintf(buf, size, "%.2f x %.2f", KMS_VIDEO_ScaleX(), KMS_VIDEO_ScaleY());
 }
 
 const char *KMS_VIDEO_ScanlinesLabel(void)
@@ -742,7 +864,17 @@ int KMS_VIDEO_ReadConfig(char *option, char *parameters)
 		if (strcmp(parameters, "INTEGER") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_INTEGER;
 		else if (strcmp(parameters, "FIT") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_FIT;
 		else if (strcmp(parameters, "STRETCH") == 0 || strcmp(parameters, "FILL") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_STRETCH;
+		else if (strcmp(parameters, "FREE") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_FREE;
 		else return FALSE;
+	}
+	else if (strcmp(option, "KMS_SCALE_X") == 0 || strcmp(option, "KMS_SCALE_Y") == 0) {
+		double f;
+		if (!Util_sscandouble(parameters, &f) || f < 0.5 || f > 32.0)
+			return FALSE;
+		if (option[10] == 'X')
+			KMS_VIDEO_free_x = f;
+		else
+			KMS_VIDEO_free_y = f;
 	}
 	else if (strcmp(option, "KMS_SMOOTH") == 0)
 		KMS_VIDEO_smooth = Util_sscanbool(parameters) == 1;
@@ -775,8 +907,10 @@ void KMS_VIDEO_WriteConfig(FILE *fp)
 {
 	static const char *const scan_cfg[] = { "OFF", "LIGHT", "MEDIUM", "STRONG" };
 	static const char *const border_cfg[] = { "FULL", "TV", "TIGHT" };
-	static const char *const names[] = { "INTEGER", "FIT", "STRETCH" };
+	static const char *const names[] = { "INTEGER", "FIT", "STRETCH", "FREE" };
 	fprintf(fp, "KMS_SCALE=%s\n", names[KMS_VIDEO_scale_mode]);
+	fprintf(fp, "KMS_SCALE_X=%.2f\n", KMS_VIDEO_free_x);
+	fprintf(fp, "KMS_SCALE_Y=%.2f\n", KMS_VIDEO_free_y);
 	fprintf(fp, "KMS_SMOOTH=%d\n", KMS_VIDEO_smooth);
 	fprintf(fp, "KMS_SCANLINES=%s\n", scan_cfg[KMS_VIDEO_scanlines]);
 	fprintf(fp, "KMS_BORDERS=%s\n", border_cfg[KMS_VIDEO_borders]);
@@ -827,7 +961,7 @@ int KMS_VIDEO_Initialise(int *argc, char *argv[])
 				Log_print("\t-kms-debug                Log frame statistics");
 				Log_print("\t-kms-mode WxH[@Hz]        Display mode (default: preferred, rate closest to the Atari)");
 				Log_print("\t-kms-lock <Hz>            Pace by the display within this of the Atari rate (0.75; 0 = off)");
-				Log_print("\t-kms-scale integer|fit|fill");
+				Log_print("\t-kms-scale integer|fit|fill|free");
 				Log_print("\t                          How to scale the picture to the panel");
 			}
 			argv[j++] = argv[i];

@@ -35,7 +35,7 @@
 #include "kms/kms_input.h"
 #include "kms/kms_sysmenu.h"
 
-#define MAX_LINES 96 /* the UI driver's Select holds 100 items */
+#define MAX_LINES 98 /* the UI driver's Select holds 100 items */
 #define LINE_MAX_W 38
 
 int KMS_HELP_requested = FALSE;
@@ -125,6 +125,8 @@ static void add_line(const char *text)
 	UI_tMenuItem *m;
 	if (n_items >= MAX_LINES)
 		return;
+	if (text[0] == '#' && n_items > 0 && text[1] != '\0')
+		add_line("#"); /* an empty line above every section title */
 	m = &items[n_items];
 	m->flags = UI_ITEM_ACTION;
 	m->retval = text[0] == '#' || text[0] == '!' ? -1 : n_items; /* -1: a label, skipped */

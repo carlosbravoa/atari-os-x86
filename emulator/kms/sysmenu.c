@@ -22,6 +22,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
@@ -380,10 +381,12 @@ static size_t hardware_lines(const char *status, char *page, size_t size)
 		}
 	}
 	add_line(page, &n, size, "Display: %s %dx%d @ %.4g Hz", KMS_VIDEO_driver, KMS_VIDEO_width, KMS_VIDEO_height, KMS_VIDEO_refresh);
-	add_line(page, &n, size, "  %s%s, scanlines %s%s", KMS_VIDEO_ScaleLabel(),
-	         KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER ? " smooth" : "",
+	KMS_VIDEO_ScaleFactors(w, sizeof w);
+	add_line(page, &n, size, "  %s %s%s", KMS_VIDEO_ScaleLabel(), w,
+	         KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER ? ", smooth" : "");
+	add_line(page, &n, size, "  Scanlines %s%s%s",
 	         KMS_VIDEO_ScanlinesPossible() || KMS_VIDEO_scanlines == KMS_SCANLINES_OFF ? KMS_VIDEO_ScanlinesLabel() : "n/a",
-	         KMS_VIDEO_NtscLook() ? ", NTSC TV" : "");
+	         KMS_VIDEO_NtscLook() ? ", " : "", KMS_VIDEO_NtscLook() ? KMS_VIDEO_NtscPresetLabel() : "");
 	add_line(page, &n, size, "Atari %s %.1f Hz, pacing: %s", Atari800_tv_mode == Atari800_TV_PAL ? "PAL" : "NTSC",
 	         KMS_VIDEO_AtariFps(), KMS_VIDEO_PacingLocked() && !Atari800_turbo ? "display" : "timer");
 	if (read_line("/proc/asound/cards", v, sizeof v)) {
@@ -895,15 +898,162 @@ static void display_changed(const char *what)
 	Log_print("sysmenu: display: %s", what);
 }
 
+/* Free scaling sliders: the value is factor * 20 - 20 (0.05 steps from
+   1.00); USER points at the axis (0 horizontal, 1 vertical, 2 both).
+   The picture follows while the slider moves (Esc puts it back). */
+static double free_saved_x, free_saved_y;
+
+static void factor_label(char *label, int value, void *user_data)
+{
+	int axis = *(int *)user_data;
+	double f = (value + 20) / 20.0;
+	KMS_VIDEO_free_x = axis == 1 ? free_saved_x : f;
+	KMS_VIDEO_free_y = axis == 0 ? free_saved_y : f;
+	KMS_VIDEO_Relayout();
+	snprintf(label, 11, "%.2f", f);
+}
+
+/* "Pixel aspect: 0.95 (4:3 TV)": the Atari picture's 336 columns on a
+   4:3 TV make pixels 4*240/(3*336) as wide as tall. */
+static void aspect_text(char *buf, size_t size)
+{
+	double a = KMS_VIDEO_free_y > 0 ? KMS_VIDEO_free_x / KMS_VIDEO_free_y : 0;
+	double tv = 4.0 * 240 / (3.0 * 336);
+	snprintf(buf, size, "Pixel aspect: %.2f%s", a,
+	         fabs(a - tv) <= 0.02 * tv ? " (4:3 TV)" : fabs(a - 1.0) <= 0.02 ? " (square)" : "");
+}
+
+/* The Free scaling popup; FALSE when another scaling mode is wanted. */
+static int free_menu(void)
+{
+	static char x_item[40], y_item[40], both_item[40], aspect_item[40];
+	int option = 0;
+
+	for (;;) {
+		UI_tMenuItem menu[] = {
+			UI_MENU_ACTION(0, x_item),
+			UI_MENU_ACTION(1, y_item),
+			UI_MENU_ACTION(2, both_item),
+			UI_MENU_LABEL(aspect_item),
+			UI_MENU_ACTION(3, "Other scaling (Integer, Fit, Fill)"),
+			UI_MENU_ACTION_ACCEL(4, "Back", "Esc"),
+			UI_MENU_END
+		};
+		int axis, cur, max, v;
+		double maxf;
+
+		snprintf(x_item, sizeof x_item, "Horizontal: %.2f", KMS_VIDEO_free_x);
+		snprintf(y_item, sizeof y_item, "Vertical:   %.2f", KMS_VIDEO_free_y);
+		if (fabs(KMS_VIDEO_free_x - KMS_VIDEO_free_y) < 0.005)
+			snprintf(both_item, sizeof both_item, "Both:       %.2f", KMS_VIDEO_free_y);
+		else
+			snprintf(both_item, sizeof both_item, "Both:       (make equal)");
+		aspect_text(aspect_item, sizeof aspect_item);
+
+		option = UI_driver->fSelect("Free scaling", UI_SELECT_POPUP, option, menu, NULL);
+		if (option == 3)
+			return FALSE;
+		if (option < 0 || option > 2)
+			return TRUE;
+		axis = option;
+		if (axis == 0)
+			maxf = KMS_VIDEO_FreeMax(0);
+		else if (axis == 1)
+			maxf = KMS_VIDEO_FreeMax(1);
+		else
+			maxf = KMS_VIDEO_FreeMax(0) < KMS_VIDEO_FreeMax(1) ? KMS_VIDEO_FreeMax(0) : KMS_VIDEO_FreeMax(1);
+		max = (int)(maxf * 20 + 1e-6) - 20;
+		if (max < 0)
+			max = 0;
+		cur = (int)((axis == 0 ? KMS_VIDEO_free_x : KMS_VIDEO_free_y) * 20 + 0.5) - 20;
+		free_saved_x = KMS_VIDEO_free_x;
+		free_saved_y = KMS_VIDEO_free_y;
+		v = UI_driver->fSelectSlider(axis == 0 ? "Horizontal" : axis == 1 ? "Vertical" : "Both",
+		                             cur, max, factor_label, &axis);
+		if (v < 0) { /* Esc: back to the factors from before */
+			KMS_VIDEO_free_x = free_saved_x;
+			KMS_VIDEO_free_y = free_saved_y;
+			KMS_VIDEO_Relayout();
+		}
+		else {
+			char what[40];
+			KMS_VIDEO_ScaleFactors(what, sizeof what);
+			display_changed(what);
+		}
+	}
+}
+
+static void sharpness_label(char *label, int value, void *user_data)
+{
+	(void)user_data;
+	KMS_VIDEO_SetNtscSharpness(value / 20.0 - 1.0);
+	snprintf(label, 11, "%+.2f", value / 20.0 - 1.0);
+}
+
+/* The TV look popup: Crisp or one of the filter presets, and the
+   sharpness on top of it (FILTER_NTSC_* in the config, atari800's own). */
+static void tv_look_menu(void)
+{
+	static const char *const names[] = { "Composite", "S-Video", "RGB monitor" };
+	static char sharp_item[40];
+	int option = KMS_VIDEO_NtscLook() ? KMS_VIDEO_NtscPreset() + 1 : 0;
+
+	if (option > 3)
+		option = 4; /* Custom/Monochrome: on the sharpness line */
+	for (;;) {
+		UI_tMenuItem menu[] = {
+			UI_MENU_ACTION(0, "Crisp (no filter)"),
+			UI_MENU_ACTION(1, "Composite (soft, colour bleed)"),
+			UI_MENU_ACTION(2, "S-Video (sharper, less bleed)"),
+			UI_MENU_ACTION(3, "RGB monitor (sharp, artifacts)"),
+			UI_MENU_ACTION(4, sharp_item),
+			UI_MENU_ACTION_ACCEL(5, "Back", "Esc"),
+			UI_MENU_END
+		};
+		double s = KMS_VIDEO_NtscSharpness();
+		int v;
+
+		snprintf(sharp_item, sizeof sharp_item, "Sharpness: %+.2f", s);
+		option = UI_driver->fSelect("TV look", UI_SELECT_POPUP, option, menu, NULL);
+		switch (option) {
+		case 0:
+			if (KMS_VIDEO_NtscLook() && KMS_VIDEO_SetNtscLook(FALSE)) {
+				CFG_WriteConfig();
+				Log_print("sysmenu: display: TV look Crisp");
+			}
+			break;
+		case 1:
+		case 2:
+		case 3:
+			if (KMS_VIDEO_SetNtscPreset(option - 1)) {
+				CFG_WriteConfig();
+				Log_print("sysmenu: display: TV look %s", names[option - 1]);
+			}
+			break;
+		case 4:
+			v = UI_driver->fSelectSlider("Sharpness", (int)((s + 1.0) * 20 + 0.5), 40, sharpness_label, NULL);
+			if (v >= 0) {
+				CFG_WriteConfig();
+				Log_print("sysmenu: display: TV sharpness %+.2f", KMS_VIDEO_NtscSharpness());
+			}
+			else
+				KMS_VIDEO_SetNtscSharpness(s);
+			break;
+		default:
+			return;
+		}
+	}
+}
+
 /* "Display...": scaling, smoothing, scanlines, borders, TV look, TV
    system, brightness. Every change is live and saved (KMS_* keys; the TV
    look is atari800's ARTIFACT_NTSC, the TV system DEFAULT_TV_MODE). */
 static void display_menu(void)
 {
-	static const char *const scales[] = { "Integer (sharpest)", "Fit (4:3, larger)", "Fill (whole screen)" };
+	static const char *const scales[] = { "Integer (sharpest)", "Fit (4:3, larger)", "Fill (whole screen)",
+	                                      "Free (set the factors)" };
 	static const char *const scans[] = { "Off", "Light (75%)", "Medium (50%)", "Strong (25%)" };
 	static const char *const borders[] = { "Full (384: all of it)", "TV (336, default)", "Tight (320)" };
-	static const char *const looks[] = { "Crisp", "NTSC TV" };
 	static char scale_item[40], smooth_item[40], scan_item[40], border_item[40], look_item[40];
 	static char tv_item[40], bri_item[40];
 	static const char *const border_labels[] = { "Full", "TV", "Tight" };
@@ -925,15 +1075,20 @@ static void display_menu(void)
 		int pal = Atari800_tv_mode == Atari800_TV_PAL;
 		int bri = backlight_get();
 		int v;
+		char factors[20];
 
-		snprintf(scale_item, sizeof scale_item, "Scaling: %s", KMS_VIDEO_ScaleLabel());
+		KMS_VIDEO_ScaleFactors(factors, sizeof factors);
+		snprintf(scale_item, sizeof scale_item, "Scaling: %s  %s", KMS_VIDEO_ScaleLabel(), factors);
 		snprintf(smooth_item, sizeof smooth_item, "Smoothing: %s%s", KMS_VIDEO_smooth ? "Smooth" : "Sharp",
-		         integer ? " (Fit/Fill only)" : "");
+		         integer ? " (not Integer)" : "");
 		snprintf(scan_item, sizeof scan_item, "Scanlines: %s%s", KMS_VIDEO_ScanlinesLabel(),
 		         KMS_VIDEO_ScanlinesPossible() ? "" : " (needs 2x)");
 		snprintf(border_item, sizeof border_item, "Borders: %s", border_labels[KMS_VIDEO_borders]);
-		snprintf(look_item, sizeof look_item, "TV look: %s%s", KMS_VIDEO_NtscLook() ? "NTSC TV" : "Crisp",
-		         pal ? " (PAL)" : "");
+		if (KMS_VIDEO_NtscLook())
+			snprintf(look_item, sizeof look_item, "TV look: %s, sharp %+.2f", KMS_VIDEO_NtscPresetLabel(),
+			         KMS_VIDEO_NtscSharpness());
+		else
+			snprintf(look_item, sizeof look_item, "TV look: Crisp%s", pal ? " (PAL)" : "");
 		snprintf(tv_item, sizeof tv_item, "TV system: %s", pal ? "PAL" : "NTSC");
 		if (bri >= 0)
 			snprintf(bri_item, sizeof bri_item, "Brightness: %d%%", bri);
@@ -943,8 +1098,26 @@ static void display_menu(void)
 		option = UI_driver->fSelect("Display", 0, option, menu, NULL);
 		switch (option) {
 		case 1:
-			v = choose("Scaling", scales, 3, KMS_VIDEO_scale_mode);
-			if (v >= 0 && v != KMS_VIDEO_scale_mode) {
+			if (KMS_VIDEO_scale_mode == KMS_SCALE_FREE && free_menu())
+				break;
+			v = choose("Scaling", scales, 4, KMS_VIDEO_scale_mode);
+			if (v == KMS_SCALE_FREE) {
+				if (KMS_VIDEO_scale_mode != KMS_SCALE_FREE) {
+					/* start from where the picture is: nothing moves yet */
+					KMS_VIDEO_free_x = KMS_VIDEO_ScaleX();
+					KMS_VIDEO_free_y = KMS_VIDEO_ScaleY();
+					KMS_VIDEO_scale_mode = v;
+					display_changed(KMS_VIDEO_ScaleLabel());
+				}
+				if (!free_menu()) {
+					v = choose("Scaling", scales, 3, KMS_SCALE_FIT);
+					if (v >= 0) {
+						KMS_VIDEO_scale_mode = v;
+						display_changed(KMS_VIDEO_ScaleLabel());
+					}
+				}
+			}
+			else if (v >= 0 && v != KMS_VIDEO_scale_mode) {
 				KMS_VIDEO_scale_mode = v;
 				display_changed(KMS_VIDEO_ScaleLabel());
 			}
@@ -978,11 +1151,7 @@ static void display_menu(void)
 				UI_driver->fMessage("NTSC only (TV system is PAL)", TRUE);
 				break;
 			}
-			v = choose("TV look", looks, 2, KMS_VIDEO_NtscLook() ? 1 : 0);
-			if (v >= 0 && v != (KMS_VIDEO_NtscLook() ? 1 : 0) && KMS_VIDEO_SetNtscLook(v == 1)) {
-				CFG_WriteConfig();
-				Log_print("sysmenu: display: TV look %s", looks[v]);
-			}
+			tv_look_menu();
 			break;
 		case 7:
 			tv_menu();

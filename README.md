@@ -292,17 +292,27 @@ with it too, and the Hardware page shows it as "Version".
 - **Eject all, back to <target>**: empties D1:-D8:, takes out the
   cartridge (not ASH's own) and the tape, and cold starts into the target
 - **Display...**: **Scaling** Integer (the largest whole factor, default),
-  Fit (the full height at the Atari's shape) or Fill (the whole panel);
-  **Smoothing** Sharp or Smooth for Fit/Fill (sharp-bilinear: pixels stay
-  square blocks, only their edges are blended); **Scanlines** Off, Light,
-  Medium, Strong (every second panel row of an Atari line at 75/50/25 %,
-  from a 2x high picture up); **Borders** Full (384 columns), TV (336,
-  default), Tight (320); **TV look** Crisp or NTSC TV (atari800's NTSC
-  composite filter, NTSC only; the same setting as Advanced > Display
-  Settings > "full NTSC filter", `ARTIFACT_NTSC=NTSC-FULL`); **TV system**
-  and **Brightness** (below). Live and saved
-  (`KMS_SCALE`, `KMS_SMOOTH`, `KMS_SCANLINES`, `KMS_BORDERS` in
-  `atari800.cfg`); `-kms-debug` logs the render time per frame
+  Fit (the full height at the Atari's shape), Fill (the whole panel) or
+  Free (your own horizontal and vertical factors, 1.00 up to what fits,
+  in 0.05 steps; sliders for Horizontal, Vertical and Both, the picture
+  follows while you move them, and the pixel aspect is shown: 0.95 is the
+  4:3 TV shape, 1.00 square). The menu line shows the factors in use,
+  horizontal x vertical (`Scaling: Fit  3.18 x 3.33`), and picking Free
+  starts from them; **Smoothing** Sharp or Smooth for Fit/Fill/Free
+  (sharp-bilinear: pixels stay square blocks, only their edges are
+  blended); **Scanlines** Off, Light, Medium, Strong (every second panel
+  row of an Atari line at 75/50/25 %, from a 2x high picture up);
+  **Borders** Full (384 columns), TV (336, default), Tight (320); **TV
+  look** Crisp or atari800's NTSC filter with a preset, Composite (soft,
+  colour bleed), S-Video (sharper, less bleed) or RGB monitor (sharp,
+  artifacts only), and a **Sharpness** slider (-1.00 .. +1.00) on top of
+  it, NTSC only (the same settings as Advanced > Display Settings > "full
+  NTSC filter" and NTSC Filter Settings: `ARTIFACT_NTSC=NTSC-FULL` and
+  atari800's `FILTER_NTSC_*` lines, which also tell the preset); **TV
+  system** and **Brightness** (below). Live and saved (`KMS_SCALE`,
+  `KMS_SCALE_X`, `KMS_SCALE_Y`, `KMS_SMOOTH`, `KMS_SCANLINES`,
+  `KMS_BORDERS` in `atari800.cfg`); `-kms-debug` logs the render time per
+  frame
 - **Sound** (volume) and Display's **Brightness**: sliders, saved in the
   emulator config (`KMS_VOLUME`, `KMS_BRIGHTNESS`)
 - **Controls...**: **Arrows** cursor keys or joystick 0 (the same switch
