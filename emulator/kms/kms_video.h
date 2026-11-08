@@ -20,11 +20,30 @@
 /* How the 336x240 Atari picture is placed on the panel. */
 enum {
 	KMS_SCALE_INTEGER, /* largest integer factor that fits, same on both axes (default) */
-	KMS_SCALE_FIT,     /* fill the height, 4:3 width, fractional nearest-neighbour */
-	KMS_SCALE_STRETCH  /* fill the whole panel */
+	KMS_SCALE_FIT,     /* fill the height, 4:3 width (Atari pixel shape kept), fractional */
+	KMS_SCALE_STRETCH  /* fill the whole panel ("Fill") */
 };
 
 extern int KMS_VIDEO_scale_mode;
+
+/* Display options (F8 > Display), KMS_SMOOTH/KMS_SCANLINES/KMS_BORDERS in
+   the config. Call KMS_VIDEO_Relayout() after changing one. */
+enum { KMS_SCANLINES_OFF, KMS_SCANLINES_LIGHT, KMS_SCANLINES_MEDIUM, KMS_SCANLINES_STRONG };
+enum { KMS_BORDERS_FULL, KMS_BORDERS_TV, KMS_BORDERS_TIGHT }; /* 384, 336, 320 columns */
+extern int KMS_VIDEO_smooth;    /* Fit/Fill: sharp-bilinear instead of nearest */
+extern int KMS_VIDEO_scanlines; /* KMS_SCANLINES_* (dark rows at 75/50/25 %) */
+extern int KMS_VIDEO_borders;   /* KMS_BORDERS_* */
+void KMS_VIDEO_Relayout(void);
+/* The picture is at least 2x high, so scanlines show. */
+int KMS_VIDEO_ScanlinesPossible(void);
+/* NTSC TV look (atari800's NTSC filter, saved as ARTIFACT_NTSC=NTSC-FULL):
+   on when the TV system is NTSC and it is chosen. SetNtscLook fails
+   (FALSE) on PAL. */
+int KMS_VIDEO_NtscLook(void);
+int KMS_VIDEO_SetNtscLook(int on);
+/* "Integer"/"Fit"/"Fill" and "Off"/"Light"/"Medium"/"Strong" */
+const char *KMS_VIDEO_ScaleLabel(void);
+const char *KMS_VIDEO_ScanlinesLabel(void);
 /* Preferred DRM node ("" = probe /dev/dri/card*). */
 extern char KMS_VIDEO_device[256];
 

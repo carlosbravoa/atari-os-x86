@@ -35,6 +35,16 @@
   (`\EFI\BOOT\BOOTX64.EFI`) once nothing else comes first in its boot
   order. Tested in QEMU (SeaBIOS, OVMF; SATA, NVMe, virtio), not yet on a
   real laptop.
+- **Local disks with Boot into: FujiNet** load at standard SIO speed
+  (19200 baud, like a real 810: ~20 s for a 90 KB boot): NetSIO turns
+  atari800's SIO patch off, so a local D1: answers on the emulated serial
+  line, where FujiNet's own disks get its high-speed SIO.
+- **No BASIC (self test)** shows the XL self test only with real XL ROMs in
+  `atari/roms/`; the built-in AltirraOS shows its own boot screen instead
+  (it has no self test).
+- **NTSC TV look**: the filter starts each line from black, so the first
+  few panel columns of the picture are darker, and the picture sits a
+  pixel or two to the right (atari800's SDL port does the same).
 
 ## ASH: copying or saving to h: fails (ASH 1.3 TN bug)
 
@@ -45,9 +55,3 @@ an `h:` destination takes the disk (CIO) path. Fix belongs in ASH: `lda
 wdev` before `bne wo_d`; then rebuild `release/ASH-TN.*`/`ASH.CAR` and bump
 the submodule. Reads from `h:`, `ls`, `cat`, `run`, `cp h: → sd:`/disk,
 `rm`/`mv` on `h:` and everything on `sd:` work.
-
-## ASH: saving the atari800 configuration while in ASH mode keeps the cartridge
-
-atari800's "Save configuration" (F1 menu) writes `CARTRIDGE_FILENAME=ASH.CAR`
-into `atari/config/atari800.cfg`; switching "Boot into" back to BASIC then
-still boots ASH until that line is removed. init does not clear it yet.

@@ -20,7 +20,4 @@ void KMS_HDEV_Poll(void);
 /* Called from Atari800_Coldstart(): sd: writes are switched off again. */
 void KMS_HDEV_ColdStart(void);
 
-/* "basic", "ash" or "fujinet", for the XIO 45 status listing. */
-void KMS_HDEV_SetBootTarget(const char *target);
-
 #endif /* KMS_KMS_HDEV_H_ */

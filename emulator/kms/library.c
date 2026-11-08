@@ -4,10 +4,11 @@
  * Part of atari-os-x86: Atari800 running directly on Linux DRM/KMS,
  * ALSA and evdev with no display server or SDL in between.
  *
- * Three kinds of sources, cycled with Tab: the collection on the stick
- * (atari/library), every USB drive PID 1 has mounted under /media/usb,
- * and FujiNet's SD folder. RETURN on a file offers Run, Mount, Copy to
- * another source and Favourite. Recent programs and favourites persist in
+ * Sources, cycled with Tab: the whole stick (its atari/ folder, opening in
+ * library/; FujiNet's SD is fujinet/SD there) and every USB drive PID 1
+ * has mounted under /media/usb. RETURN on a file offers Run, Run with
+ * BASIC, Mount, Copy to the library, FujiNet's SD or a USB drive, and
+ * Favourite. Recent programs and favourites persist in
  * atari/config/library.cfg. Drawn with atari800's UI driver, like the F1
  * and F8 menus; everything happens on the host side. A .zip is opened
  * here too: its Atari files are listed, the chosen one is extracted to
@@ -45,6 +46,7 @@
 #include "sio.h"
 #include "ui.h"
 #include "util.h"
+#include "kms/kms_boot.h"
 #include "kms/kms_library.h"
 #include "kms/kms_video.h"
 #include "kms/kms_zipfile.h"
@@ -54,7 +56,7 @@
 #define ZIP_RUN_DIR  "/run/atari-zip" /* zipped files are extracted here (tmpfs) */
 
 #define MAX_SOURCES  10
-#define MAX_VOLS     (MAX_SOURCES - 2)
+#define MAX_VOLS     (MAX_SOURCES - 1)
 #define MAX_ENTRIES  2000
 #define MAX_RECENT   8
 #define MAX_FAVS     32
@@ -74,18 +76,24 @@
 /* Action popup return values. */
 #define ACT_RUN      1
 #define ACT_MOUNT    2
-#define ACT_COPY     20   /* + source index */
+#define ACT_RUN_BASIC 3
+#define ACT_EJECT    4
+#define ACT_COPY_LIB 21
+#define ACT_COPY_SD  22
+#define ACT_COPY_TO  23
+#define ACT_COPY_USB 30   /* + source index, in the "Copy to..." popup */
 #define ACT_FAV      50
 #define ACT_CANCEL   51
 
 int KMS_LIBRARY_requested = FALSE;
 
-enum { SRC_LIBRARY, SRC_USB, SRC_SD };
+enum { SRC_STICK, SRC_USB };
 
 typedef struct {
 	int kind;
-	char name[48];             /* "Library", "USB GAMES", "FujiNet SD" */
+	char name[48];             /* "Stick", "USB GAMES" */
 	char root[FILENAME_MAX];
+	char start[32];            /* where the tab opens: "library" on the stick */
 } lib_source;
 
 typedef struct {
@@ -336,30 +344,52 @@ static int list_volumes(char names[][64], int max)
 	return n;
 }
 
+/* Where "Copy to Library" and "Copy to FujiNet SD" put files. */
+static void library_dir(char *out, size_t size)
+{
+	if (have_stick())
+		Util_strlcpy(out, STICK_USER "/library", size);
+	else
+		home_path(out, size, "library");
+}
+
+static void sd_dir(char *out, size_t size)
+{
+	Util_strlcpy(out, have_stick() ? STICK_USER "/fujinet/SD" : "/run/fujinet/SD", size);
+}
+
 static void build_sources(void)
 {
 	char vols[MAX_VOLS][64];
 	int i, nv = list_volumes(vols, MAX_VOLS);
 
 	n_sources = 0;
-	sources[0].kind = SRC_LIBRARY;
-	Util_strlcpy(sources[0].name, "Library", sizeof sources[0].name);
-	if (have_stick())
-		Util_strlcpy(sources[0].root, STICK_USER "/library", sizeof sources[0].root);
-	else
+	sources[0].kind = SRC_STICK;
+	if (have_stick()) {
+		/* the whole stick: library/, fujinet/SD, disks/, ash/, ... */
+		Util_strlcpy(sources[0].name, "Stick", sizeof sources[0].name);
+		Util_strlcpy(sources[0].root, STICK_USER, sizeof sources[0].root);
+		Util_strlcpy(sources[0].start, "library", sizeof sources[0].start);
+	}
+	else {
+		Util_strlcpy(sources[0].name, "Library", sizeof sources[0].name);
 		home_path(sources[0].root, sizeof sources[0].root, "library");
+		sources[0].start[0] = '\0';
+	}
 	n_sources++;
 	for (i = 0; i < nv; i++) {
 		lib_source *s = &sources[n_sources++];
 		s->kind = SRC_USB;
 		snprintf(s->name, sizeof s->name, "USB %.40s", vols[i]);
 		snprintf(s->root, sizeof s->root, USB_DIR "/%s", vols[i]);
+		s->start[0] = '\0';
 	}
-	sources[n_sources].kind = SRC_SD;
-	Util_strlcpy(sources[n_sources].name, "FujiNet SD", sizeof sources[n_sources].name);
-	Util_strlcpy(sources[n_sources].root, have_stick() ? STICK_USER "/fujinet/SD" : "/run/fujinet/SD",
-	             sizeof sources[n_sources].root);
-	n_sources++;
+}
+
+/* Not listed at the stick's root: nothing runnable, and ssh/ holds keys. */
+static int hidden_on_stick(const char *name)
+{
+	return strcmp(name, "config") == 0 || strcmp(name, "ssh") == 0 || strcmp(name, "logs") == 0;
 }
 
 static int find_source(const char *root)
@@ -371,21 +401,44 @@ static int find_source(const char *root)
 	return -1;
 }
 
-/* The source a path lives in, or -1; *rel gets the path below its root. */
-static int source_of(const char *path, const char **rel)
+static int below(const char *path, const char *dir)
+{
+	size_t len = strlen(dir);
+	return strncmp(path, dir, len) == 0 && path[len] == '/';
+}
+
+/* The source a path lives in, or -1. */
+static int source_of(const char *path)
 {
 	int i;
-	for (i = 0; i < n_sources; i++) {
-		size_t len = strlen(sources[i].root);
-		if (strncmp(path, sources[i].root, len) == 0 && path[len] == '/') {
-			if (rel)
-				*rel = path + len + 1;
+	for (i = n_sources - 1; i >= 0; i--) /* USB drives before the stick */
+		if (below(path, sources[i].root))
 			return i;
-		}
-	}
-	if (rel)
-		*rel = base_name(path);
 	return -1;
+}
+
+/* What a copy keeps of PATH's folders: the path below the library, the
+   FujiNet SD folder or a USB drive's root; below the stick's other
+   folders (disks/, ash/, ...) without that folder; else just the name. */
+static const char *copy_rel(const char *path)
+{
+	char dir[FILENAME_MAX];
+	int i;
+	library_dir(dir, sizeof dir);
+	if (below(path, dir))
+		return path + strlen(dir) + 1;
+	sd_dir(dir, sizeof dir);
+	if (below(path, dir))
+		return path + strlen(dir) + 1;
+	for (i = 1; i < n_sources; i++)
+		if (below(path, sources[i].root))
+			return path + strlen(sources[i].root) + 1;
+	if (have_stick() && below(path, STICK_USER)) {
+		const char *rest = strchr(path + strlen(STICK_USER) + 1, '/');
+		if (rest)
+			return rest + 1;
+	}
+	return base_name(path);
 }
 
 /* ---- recent and favourites ------------------------------------------- */
@@ -507,7 +560,7 @@ static int entry_cmp(const void *a, const void *b)
 	return r ? r : strcmp(x->name, y->name);
 }
 
-static int read_dir(const char *dir, const char *filter)
+static int read_dir(const char *dir, const char *filter, int stick_root)
 {
 	DIR *d;
 	struct dirent *e;
@@ -520,7 +573,7 @@ static int read_dir(const char *dir, const char *filter)
 		return FALSE;
 	while ((e = readdir(d)) != NULL) {
 		struct stat st;
-		if (e->d_name[0] == '.')
+		if (e->d_name[0] == '.' || (stick_root && hidden_on_stick(e->d_name)))
 			continue;
 		join_path(path, sizeof path, dir, e->d_name);
 		if (stat(path, &st) != 0)
@@ -710,11 +763,17 @@ static int pick_cart_type(int kb)
 
 /* ref is what Recent remembers: path itself, or "zip!entry" when path is
    the extracted copy of a zipped file. */
-static int run_file(const char *path, const char *ref)
+static int run_file(const char *path, const char *ref, int with_basic)
 {
 	int type;
-	Log_print("library: run %s", path);
+	Log_print("library: run %s%s", path, with_basic ? " (with BASIC)" : "");
+	/* Run boots this file: a cartridge left in would win over a disk or
+	   a program (kms/boot.c only takes ASH's own one out) */
+	if (file_kind(path) != FK_CART)
+		CARTRIDGE_Remove();
+	KMS_BOOT_with_basic = with_basic; /* read by the cold start below */
 	type = AFILE_OpenFile(path, TRUE, 1, FALSE);
+	KMS_BOOT_with_basic = FALSE;
 	if (type == AFILE_ERROR) {
 		cant("Could not run", path);
 		return FALSE;
@@ -855,10 +914,11 @@ static int copy_data(const char *from, const char *to)
 	return err;
 }
 
-static void copy_file(const char *path, int dst)
+/* Copy PATH into the folder DST_ROOT (keeping its folders, copy_rel());
+   USB: say it is safe to unplug afterwards. */
+static void copy_file(const char *path, const char *dst_root, int usb)
 {
 	char target[FILENAME_MAX], dir[FILENAME_MAX], line[40];
-	const char *rel;
 	struct stat src_st, dst_st;
 	int err;
 
@@ -870,8 +930,7 @@ static void copy_file(const char *path, int dst)
 		message("Folders cannot be copied");
 		return;
 	}
-	source_of(path, &rel);
-	join_path(target, sizeof target, sources[dst].root, rel);
+	join_path(target, sizeof target, dst_root, copy_rel(path));
 	if (stat(target, &dst_st) == 0) {
 		if (dst_st.st_dev == src_st.st_dev && dst_st.st_ino == src_st.st_ino) {
 			message("That is the same file");
@@ -898,7 +957,7 @@ static void copy_file(const char *path, int dst)
 		return;
 	}
 	Log_print("library: copied %s -> %s", path, target);
-	message(sources[dst].kind == SRC_USB ? "Copied. Safe to unplug." : "Copied.");
+	message(usb ? "Copied. Safe to unplug." : "Copied.");
 }
 
 /* ---- zip files -------------------------------------------------------- */
@@ -1060,44 +1119,90 @@ static int zip_prepare(const char *zip, const char *want, char *entry, size_t es
    its drive is not plugged in); ref: what Recent and Favourites remember;
    copy: what "Copy to" copies (a zip is copied whole); title: its name.
    Returns TRUE when a program was started. */
-static int action_popup(const char *run, const char *ref, const char *copy, const char *title)
+/* "Copy to...": the USB drives other than the one COPY is on. */
+static void copy_to_usb(const char *copy)
 {
 	char line[40];
-	int kind, from, i, r;
+	int i, r, from = source_of(copy);
+	menu_reset();
+	menu_add(-1, NULL, "Copy to", NULL);
+	for (i = 1; i < n_sources; i++)
+		if (i != from) {
+			snprintf(line, sizeof line, "%.36s", sources[i].name);
+			menu_add(ACT_COPY_USB + i, NULL, line, NULL);
+		}
+	menu_add(ACT_CANCEL, NULL, "Cancel", NULL);
+	r = UI_driver->fSelect("Copy to", UI_SELECT_POPUP, menu_first_selectable(), menu, NULL);
+	if (r > ACT_COPY_USB && r < ACT_COPY_USB + n_sources)
+		copy_file(copy, sources[r - ACT_COPY_USB].root, TRUE);
+}
+
+static int is_disk_image(const char *name)
+{
+	static const char *const ext[] = { ".atr", ".xfd", ".dcm", ".atx", ".atr.gz", ".xfd.gz", NULL };
+	int i;
+	for (i = 0; ext[i]; i++)
+		if (Util_striendswith(name, ext[i]))
+			return TRUE;
+	return FALSE;
+}
+
+static int action_popup(const char *run, const char *ref, const char *copy, const char *title)
+{
+	char lib[FILENAME_MAX], sd[FILENAME_MAX];
+	int kind, from, i, r, usb_targets = 0;
 	int there = run != NULL && is_regular(run);
 
 	kind = file_kind(there ? run : ref);
-	from = source_of(copy, NULL);
+	from = source_of(copy);
+	library_dir(lib, sizeof lib);
+	sd_dir(sd, sizeof sd);
+	for (i = 1; i < n_sources; i++)
+		if (i != from)
+			usb_targets++;
 
 	menu_reset();
 	menu_add(-1, NULL, title, NULL);
 	if (there) {
 		menu_add(ACT_RUN, NULL, "Run", NULL);
+		if (kind == FK_DISK && is_disk_image(run))
+			menu_add(ACT_RUN_BASIC, NULL, "Run with BASIC", NULL);
 		if (kind == FK_DISK)
 			menu_add(ACT_MOUNT, NULL, "Mount as D1:", NULL);
 		else if (kind == FK_CART)
 			menu_add(ACT_MOUNT, NULL, "Insert cartridge", NULL);
 		else if (kind == FK_TAPE)
 			menu_add(ACT_MOUNT, NULL, "Insert tape", NULL);
-		for (i = 0; i < n_sources; i++) {
-			if (i == from)
-				continue;
-			snprintf(line, sizeof line, "Copy to %.30s", sources[i].name);
-			menu_add(ACT_COPY + i, NULL, line, NULL);
-		}
+		if (!below(copy, lib))
+			menu_add(ACT_COPY_LIB, NULL, "Copy to Library", NULL);
+		if (!below(copy, sd))
+			menu_add(ACT_COPY_SD, NULL, "Copy to FujiNet SD", NULL);
+		if (usb_targets > 0)
+			menu_add(ACT_COPY_TO, NULL, "Copy to...", NULL);
 	}
 	else
 		menu_add(-1, NULL, "(its drive is not plugged in)", NULL);
 	menu_add(ACT_FAV, NULL, fav_index(ref) >= 0 ? "Unfavourite" : "Favourite", NULL);
+	if (KMS_BOOT_SomethingMounted())
+		menu_add(ACT_EJECT, NULL, "Eject all & reboot", NULL);
 	menu_add(ACT_CANCEL, NULL, "Cancel", NULL);
 
 	r = UI_driver->fSelect(title, UI_SELECT_POPUP, there ? ACT_RUN : ACT_FAV, menu, NULL);
-	if (r == ACT_RUN)
-		return run_file(run, ref);
+	if (r == ACT_RUN || r == ACT_RUN_BASIC)
+		return run_file(run, ref, r == ACT_RUN_BASIC);
+	if (r == ACT_EJECT) {
+		Log_print("library: eject all");
+		KMS_BOOT_EjectAll();
+		return TRUE; /* back to the Atari */
+	}
 	if (r == ACT_MOUNT)
 		mount_file(run);
-	else if (r >= ACT_COPY && r < ACT_COPY + n_sources)
-		copy_file(copy, r - ACT_COPY);
+	else if (r == ACT_COPY_LIB)
+		copy_file(copy, lib, FALSE);
+	else if (r == ACT_COPY_SD)
+		copy_file(copy, sd, FALSE);
+	else if (r == ACT_COPY_TO)
+		copy_to_usb(copy);
 	else if (r == ACT_FAV)
 		toggle_fav(ref);
 	return FALSE;
@@ -1144,9 +1249,6 @@ static void make_title(char *out, size_t size, const lib_source *src, const char
 		Util_strlcpy(tail, path, sizeof tail);
 	if (filter[0])
 		snprintf(out, size, "%.12s: %s (filter: %.8s)", src->name, tail, filter);
-	else if (src->kind == SRC_SD && !rel[0])
-		/* CONFIG calls this folder the host "SD" */
-		snprintf(out, size, "FujiNet SD (host SD in CONFIG)");
 	else
 		snprintf(out, size, "%s: %s", src->name, tail);
 }
@@ -1167,9 +1269,10 @@ int KMS_LIBRARY_Run(void)
 	}
 	load_cfg();
 	build_sources();
-	make_dirs(sources[0].root);
+	library_dir(dir, sizeof dir);
+	make_dirs(dir);
 	Util_strlcpy(root, sources[0].root, sizeof root);
-	rel[0] = '\0';
+	Util_strlcpy(rel, sources[0].start, sizeof rel);
 	want[0] = '\0';
 	Log_print("library: open (%d sources)", n_sources);
 
@@ -1183,12 +1286,12 @@ int KMS_LIBRARY_Run(void)
 			Log_print("library: %s is gone", root);
 			src = 0;
 			Util_strlcpy(root, sources[0].root, sizeof root);
-			rel[0] = '\0';
+			Util_strlcpy(rel, sources[0].start, sizeof rel);
 			page = 0;
 			sel = -1;
 		}
 		join_path(dir, sizeof dir, root, rel);
-		if (!read_dir(dir, filter) && rel[0]) {
+		if (!read_dir(dir, filter, sources[src].kind == SRC_STICK && sources[src].start[0] && !rel[0]) && rel[0]) {
 			rel[0] = '\0'; /* the folder went away */
 			page = 0;
 			sel = -1;
@@ -1205,7 +1308,8 @@ int KMS_LIBRARY_Run(void)
 		}
 		if (page * PAGE >= n_visible)
 			page = n_visible > 0 ? (n_visible - 1) / PAGE : 0;
-		at_lib_root = src == 0 && !rel[0];
+		/* Recent and Favourites: at the stick's root and in library/ */
+		at_lib_root = src == 0 && (!rel[0] || strcmp(rel, sources[0].start) == 0);
 
 		menu_reset();
 		snprintf(line, sizeof line, "[ Source: %.20s   TAB ]", sources[src].name);
@@ -1257,13 +1361,15 @@ int KMS_LIBRARY_Run(void)
 		if (r == -2) { /* Tab: next source */
 			src = (src + 1) % n_sources;
 			Util_strlcpy(root, sources[src].root, sizeof root);
-			rel[0] = '\0';
+			Util_strlcpy(rel, sources[src].start, sizeof rel);
 			page = 0;
 			sel = -1;
 			continue;
 		}
 		if (r == -1 || seltype == UI_USER_DELETE || r == RV_PARENT) {
 			char *slash;
+			if (r == -1 && sources[src].start[0] && strcmp(rel, sources[src].start) == 0)
+				break; /* Esc where the tab opens (library/) closes it too */
 			if (!rel[0]) {
 				if (r == -1)
 					break; /* Esc at a source root closes the Library */

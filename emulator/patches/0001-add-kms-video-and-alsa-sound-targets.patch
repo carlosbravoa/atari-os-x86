@@ -1,5 +1,5 @@
 diff --git a/configure.ac b/configure.ac
-index 61d89b4a..1edc06d7 100644
+index 61d89b4a..40e5d82c 100644
 --- a/configure.ac
 +++ b/configure.ac
 @@ -668,10 +668,10 @@ fi
@@ -27,7 +27,7 @@ index 61d89b4a..1edc06d7 100644
          if [[ "$with_video" = check -o "$with_video" = yes -o "$with_video" = curses ]]; then
              AC_CHECK_LIB([curses], [initscr],
                  [LIBS="-lcurses $LIBS"
-@@ -784,6 +789,14 @@ if [[ "$a8_target" = default ]]; then
+@@ -784,6 +789,15 @@ if [[ "$a8_target" = default ]]; then
              AC_DEFINE(AF80,1,[The Austin Franklin 80 column card.])
              AC_DEFINE(BIT3,1,[The Bit3 Full View 80 column card.])
              ;;
@@ -38,11 +38,12 @@ index 61d89b4a..1edc06d7 100644
 +            AC_DEFINE(SUPPORTS_PLATFORM_CONFIGURE,1,[Additional config file options.])
 +            AC_DEFINE(SUPPORTS_PLATFORM_CONFIGSAVE,1,[Save additional config file options.])
 +            AC_DEFINE(SUPPORTS_PLATFORM_PALETTEUPDATE,1,[Update the Palette if it changed.])
++            WANT_NTSC_FILTER=yes
 +            ;;
          dosvga)
              AC_DEFINE(DOSVGA,1,[Target: DOS VGA.])
              AC_DEFINE(SUPPORTS_PLATFORM_CONFIGURE,1,[Additional config file options.])
-@@ -806,6 +819,7 @@ AM_CONDITIONAL(WITH_VIDEO_JAVANVM, test "$with_video" = javanvm)
+@@ -806,6 +820,7 @@ AM_CONDITIONAL(WITH_VIDEO_JAVANVM, test "$with_video" = javanvm)
  AM_CONDITIONAL(WITH_VIDEO_SDL, test "$with_video" = sdl)
  AM_CONDITIONAL(WITH_VIDEO_SDL2, test "$with_video" = sdl2)
  AM_CONDITIONAL(WITH_VIDEO_DOSVGA, test "$with_video" = dosvga)
@@ -50,7 +51,7 @@ index 61d89b4a..1edc06d7 100644
  AM_CONDITIONAL(WITH_VIDEO_CURSES, test "$with_video" = curses -o "$with_video" = ncurses -o "$with_video" = pdcurses)
  AM_CONDITIONAL(WITH_VIDEO_LIBATARI800, test "$a8_target" = libatari800)
  AM_CONDITIONAL(WITH_VIDEO_NO, test "$with_video" = no)
-@@ -1002,10 +1016,10 @@ fi
+@@ -1002,10 +1017,10 @@ fi
  dnl Select/detect sound interface.
  
  AC_ARG_WITH([sound],
@@ -63,7 +64,7 @@ index 61d89b4a..1edc06d7 100644
                  ;;
              *)
                  AC_MSG_ERROR([unrecognized value for --with-sound: "$withval"])
-@@ -1061,6 +1075,10 @@ elif [[ "$a8_target" != "ps2" -a "$a8_target" != "android" ]]; then
+@@ -1061,6 +1076,10 @@ elif [[ "$a8_target" != "ps2" -a "$a8_target" != "android" ]]; then
                  AC_MSG_FAILURE([--with-sound=sdl was given, but SDL library not found!])
              fi
          fi
@@ -74,7 +75,7 @@ index 61d89b4a..1edc06d7 100644
          if [[ "$with_sound" = check -o "$with_sound" = yes -o "$with_sound" = oss ]]; then
              if [[ "$SUPPORTS_SOUND_OSS" = yes ]]; then
                  with_sound=oss
-@@ -1085,6 +1103,8 @@ elif [[ "$a8_target" != "ps2" -a "$a8_target" != "android" ]]; then
+@@ -1085,6 +1104,8 @@ elif [[ "$a8_target" != "ps2" -a "$a8_target" != "android" ]]; then
          dossb)
              WANT_SOUND_CALLBACK=yes
              ;;
@@ -83,7 +84,7 @@ index 61d89b4a..1edc06d7 100644
          no)
              ;;
          *)
-@@ -1096,6 +1116,7 @@ AM_CONDITIONAL([WITH_SOUND], test "$with_sound" != no)
+@@ -1096,6 +1117,7 @@ AM_CONDITIONAL([WITH_SOUND], test "$with_sound" != no)
  AM_CONDITIONAL([WITH_SOUND_JAVANVM], test "$with_sound" = javanvm)
  AM_CONDITIONAL([WITH_SOUND_FALCON], test "$with_sound" = falcon)
  AM_CONDITIONAL([WITH_SOUND_OSS], test "$with_sound" = oss)
@@ -92,7 +93,7 @@ index 61d89b4a..1edc06d7 100644
  AM_CONDITIONAL([WITH_SOUND_SDL2], test "$with_sound" = sdl2)
  AM_CONDITIONAL([WITH_SOUND_DOSSB], test "$with_sound" = dossb)
 diff --git a/src/Makefile.am b/src/Makefile.am
-index a1491602..96f8ba3e 100644
+index a1491602..84320777 100644
 --- a/src/Makefile.am
 +++ b/src/Makefile.am
 @@ -124,6 +124,9 @@ endif
@@ -105,7 +106,7 @@ index a1491602..96f8ba3e 100644
  if WITH_SOUND_LIBATARI800
  atari800_SOURCES += sound.c libatari800/sound.c libatari800/sound.h
  endif
-@@ -212,6 +215,17 @@ atari800_SOURCES += \
+@@ -212,6 +215,18 @@ atari800_SOURCES += \
  atari800_SOURCES += pbi_proto80.c pbi_proto80.h af80.c af80.h bit3.c bit3.h
  endif
  
@@ -117,27 +118,41 @@ index a1491602..96f8ba3e 100644
 +	kms/sysmenu.c kms/kms_sysmenu.h \
 +	kms/library.c kms/kms_library.h \
 +	kms/zipfile.c kms/kms_zipfile.h \
-+	kms/hdev.c kms/kms_hdev.h
++	kms/hdev.c kms/kms_hdev.h \
++	kms/boot.c kms/kms_boot.h
 +endif
 +
  if WITH_VIDEO_DOSVGA
  atari800_SOURCES += dos/atari_vga.c dos/vga_gfx.c dos/vga_gfx.h dos/vga_asm.s dos/dos_ints.h
  endif
 diff --git a/src/atari.c b/src/atari.c
-index 63910a89..b6742ec0 100644
+index 63910a89..dd0a49fd 100644
 --- a/src/atari.c
 +++ b/src/atari.c
-@@ -154,6 +154,9 @@
+@@ -154,6 +154,10 @@
  #ifdef SDL
  #include "sdl/init.h"
  #endif
 +#ifdef KMS
++#include "kms/kms_boot.h"
 +#include "kms/kms_hdev.h"
 +#endif
  #ifdef NETSIO
  #include "netsio.h"
  
-@@ -296,6 +299,9 @@ void Atari800_Coldstart(void)
+@@ -264,6 +268,11 @@ void Atari800_Warmstart(void)
+ 
+ void Atari800_Coldstart(void)
+ {
++#ifdef KMS
++	/* atari-os-x86: what is mounted boots, else the boot target (cartridge
++	   and BASIC are set up before the machine restarts; kms/boot.c) */
++	KMS_BOOT_ColdStart();
++#endif
+ 	PBI_Reset();
+ 	PIA_Reset();
+ 	ANTIC_Reset();
+@@ -296,6 +305,9 @@ void Atari800_Coldstart(void)
  	if(netsio_enabled)
  		netsio_cold_reset();
  #endif /* NETSIO */
@@ -147,7 +162,7 @@ index 63910a89..b6742ec0 100644
  }
  
  int Atari800_LoadImage(const char *filename, UBYTE *buffer, int nbytes)
-@@ -1288,6 +1294,14 @@ void Atari800_Sync(void)
+@@ -1288,6 +1300,14 @@ void Atari800_Sync(void)
  
  	if ((lasttime + deltatime) < curtime)
  		lasttime = curtime;
@@ -163,7 +178,7 @@ index 63910a89..b6742ec0 100644
  
  #if defined(BASIC) || defined(VERY_SLOW) || defined(CURSES_BASIC)
 diff --git a/src/sio.c b/src/sio.c
-index 9a5b7104..49ffa91e 100644
+index 9a5b7104..a9b394db 100644
 --- a/src/sio.c
 +++ b/src/sio.c
 @@ -45,6 +45,9 @@
@@ -176,7 +191,25 @@ index 9a5b7104..49ffa91e 100644
  #ifndef BASIC
  #include "statesav.h"
  #endif
-@@ -1250,6 +1253,11 @@ void SIO_Handler(void)
+@@ -185,6 +188,17 @@ static int TransferStatus = SIO_NoFrame;
+ static int ExpectedBytes = 0;
+ #ifdef NETSIO
+ int NetSIO_GetByte(void);
++#if defined(KMS)
++/* atari-os-x86: with NetSIO on, a command frame for a drive that holds a
++   local image is answered by atari800's own drive emulation and FujiNet-PC
++   never sees it (local wins): COMMAND ON is held back until the frame's
++   first byte names the device. */
++static int kms_cmd_on_pending = FALSE;
++static int kms_local_frame = FALSE;
++#define KMS_LOCAL_SIO (kms_local_frame && TransferStatus != SIO_NoFrame)
++#else
++#define KMS_LOCAL_SIO FALSE
++#endif
+ #endif
+ 
+ int ignore_header_writeprotect = FALSE;
+@@ -1250,6 +1264,11 @@ void SIO_Handler(void)
  			result = 'N';
  		}
  	}
@@ -188,6 +221,89 @@ index 9a5b7104..49ffa91e 100644
  	/* cassette i/o */
  	else if (MEMORY_dGetByte(0x300) == 0x60) {
  		UBYTE gaps = MEMORY_dGetByte(0x30b);
+@@ -1510,6 +1529,9 @@ void SIO_SwitchCommandFrame(int onoff)
+ {
+ #ifdef NETSIO
+ 	if (netsio_enabled && netsio_netstream_active()) {
++#ifdef KMS
++		kms_cmd_on_pending = kms_local_frame = FALSE;
++#endif
+ 		CommandIndex = 0;
+ 		DataIndex = 0;
+ 		ExpectedBytes = 0;
+@@ -1520,8 +1542,15 @@ void SIO_SwitchCommandFrame(int onoff)
+ 	if (onoff)
+ 	{				/* Enabled */
+ #ifdef NETSIO
+-		if (netsio_enabled)
++		if (netsio_enabled) {
++#ifdef KMS
++			/* sent with the first byte, unless the frame is for a local drive */
++			kms_cmd_on_pending = TRUE;
++			kms_local_frame = FALSE;
++#else
+ 			netsio_cmd_on();
++#endif
++		}
+ #endif /* NETSIO */
+ 		if (TransferStatus != SIO_NoFrame) 
+ #ifdef NETSIO
+@@ -1537,7 +1566,12 @@ void SIO_SwitchCommandFrame(int onoff)
+ 	else
+ 	{
+ #ifdef NETSIO
++#ifdef KMS
++		kms_cmd_on_pending = FALSE; /* nothing was sent: FujiNet saw no frame */
++		if (netsio_enabled && !kms_local_frame)
++#else
+ 		if (netsio_enabled)
++#endif
+ 		{
+ 			if (CommandIndex < ExpectedBytes)
+ 			{
+@@ -1597,6 +1631,12 @@ static UBYTE WriteSectorBack(void)
+ #ifdef NETSIO
+ void NetSIO_PutByte(int byte)
+ {
++#ifdef KMS
++	if (kms_cmd_on_pending) { /* a byte that did not come through SIO_PutByte */
++		kms_cmd_on_pending = FALSE;
++		netsio_cmd_on();
++	}
++#endif
+ #ifdef DEBUG2
+ 	Log_print("NetSIO_PutByte_%d: %02x", TransferStatus, byte);
+ #endif
+@@ -1663,7 +1703,19 @@ void NetSIO_PutByte(int byte)
+ void SIO_PutByte(int byte)
+ {
+ #ifdef NETSIO
+-	if (netsio_enabled && !BINLOAD_start_binloading)
++#ifdef KMS
++	if (netsio_enabled && !BINLOAD_start_binloading && kms_cmd_on_pending
++	    && TransferStatus == SIO_CommandFrame && CommandIndex == 0) {
++		/* the device ID: a drive with a local image answers itself */
++		kms_cmd_on_pending = FALSE;
++		kms_local_frame = byte >= 0x31 && byte <= 0x38
++		                  && (SIO_drive_status[byte - 0x31] == SIO_READ_ONLY
++		                      || SIO_drive_status[byte - 0x31] == SIO_READ_WRITE);
++		if (!kms_local_frame)
++			netsio_cmd_on();
++	}
++#endif
++	if (netsio_enabled && !BINLOAD_start_binloading && !KMS_LOCAL_SIO)
+ 	{
+ 		NetSIO_PutByte(byte);
+ 		return;
+@@ -1824,7 +1876,7 @@ int SIO_GetByte(void)
+ 	int byte = 0;
+ 
+ #ifdef NETSIO
+-	if (netsio_enabled && !BINLOAD_start_binloading)
++	if (netsio_enabled && !BINLOAD_start_binloading && !KMS_LOCAL_SIO)
+ 		return NetSIO_GetByte();
+ #endif /* NETSIO */
+ 
 diff --git a/src/ui.c b/src/ui.c
 index 5b651bcf..3366bb37 100644
 --- a/src/ui.c

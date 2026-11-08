@@ -40,7 +40,7 @@
 #include "platform.h"
 #include "ui.h"
 #include "util.h"
-#include "kms/kms_hdev.h"
+#include "kms/kms_boot.h"
 #include "kms/kms_sysmenu.h"
 #include "kms/kms_video.h"
 #include <sys/utsname.h>
@@ -129,8 +129,8 @@ static const char *status_get(const char *status, const char *key, char *out, si
 	return out;
 }
 
-/* The boot target from a status reply: "basic", "ash" or "fujinet"
-   (an init from before "boot" only says "fujinet on|off"). */
+/* The boot target from a status reply: "basic", "nobasic", "ash" or
+   "fujinet" (an init from before "boot" only says "fujinet on|off"). */
 static const char *boot_of(const char *status, char *out, size_t size)
 {
 	char fuji[16];
@@ -140,11 +140,7 @@ static const char *boot_of(const char *status, char *out, size_t size)
 
 static const char *boot_label(const char *target)
 {
-	if (strcmp(target, "ash") == 0)
-		return "ASH";
-	if (strcmp(target, "fujinet") == 0)
-		return "FujiNet CONFIG";
-	return "BASIC";
+	return KMS_BOOT_TargetLabel(target);
 }
 
 /* ---- backlight ------------------------------------------------------- */
@@ -252,13 +248,14 @@ void KMS_SYSMENU_ApplySettings(void)
 		KMS_VIDEO_SetHint("F8 = System menu    F1 = Emulator menu", 25.0);
 	}
 	{
-		/* once: ASH's "mount" listing shows the boot target */
+		/* once, before the first cold start: what to boot when
+		   nothing is mounted (kms/boot.c; ASH's STATUS shows it) */
 		static int asked = FALSE;
 		char status[1024], buf[16];
 		if (!asked) {
 			asked = TRUE;
 			if (ctl_request("status", status, sizeof status))
-				KMS_HDEV_SetBootTarget(boot_of(status, buf, sizeof buf));
+				KMS_BOOT_SetTarget(boot_of(status, buf, sizeof buf));
 		}
 	}
 }
@@ -349,6 +346,10 @@ static void hardware_page(const char *status)
 		}
 	}
 	add_line(page, &n, sizeof page, "Display: %s %dx%d @ %.4g Hz", KMS_VIDEO_driver, KMS_VIDEO_width, KMS_VIDEO_height, KMS_VIDEO_refresh);
+	add_line(page, &n, sizeof page, "  %s%s, scanlines %s%s", KMS_VIDEO_ScaleLabel(),
+	         KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER ? " smooth" : "",
+	         KMS_VIDEO_ScanlinesPossible() || KMS_VIDEO_scanlines == KMS_SCANLINES_OFF ? KMS_VIDEO_ScanlinesLabel() : "n/a",
+	         KMS_VIDEO_NtscLook() ? ", NTSC TV" : "");
 	add_line(page, &n, sizeof page, "Atari %s %.1f Hz, pacing: %s", Atari800_tv_mode == Atari800_TV_PAL ? "PAL" : "NTSC",
 	         KMS_VIDEO_AtariFps(), KMS_VIDEO_PacingLocked() && !Atari800_turbo ? "display" : "timer");
 	if (read_line("/proc/asound/cards", v, sizeof v)) {
@@ -370,6 +371,7 @@ static void hardware_page(const char *status)
 	boot_of(status, v, sizeof v);
 	status_get(status, "ssh", w, sizeof w, "?");
 	add_line(page, &n, sizeof page, "Boot: %s, SSH %s", boot_label(v), w);
+	add_line(page, &n, sizeof page, "Started: %.30s", KMS_BOOT_LastRoute());
 	{
 		struct utsname u;
 		if (uname(&u) == 0)
@@ -629,31 +631,32 @@ static void wifi_menu(void)
 	}
 }
 
-/* "Boot into": BASIC, ASH or FujiNet CONFIG. Choosing another one makes
-   init save it and restart the emulator; TRUE when that is under way. */
+/* "Boot into" (what starts when nothing is mounted): BASIC, No BASIC,
+   ASH or FujiNet CONFIG. Choosing another one makes init save it and
+   restart the emulator; TRUE when that is under way. */
 static int boot_menu(const char *current)
 {
-	static const char *const names[] = { "basic", "ash", "fujinet" };
+	static const char *const names[] = { "basic", "nobasic", "ash", "fujinet" };
 	static char ash_item[32];
 	UI_tMenuItem menu[] = {
 		UI_MENU_ACTION(1, "BASIC"),
-		UI_MENU_ACTION(2, ash_item),
-		UI_MENU_ACTION(3, "FujiNet CONFIG"),
+		UI_MENU_ACTION(2, "No BASIC (self test)"),
+		UI_MENU_ACTION(3, ash_item),
+		UI_MENU_ACTION(4, "FujiNet CONFIG"),
 		UI_MENU_END
 	};
 	char cmd[32], reply[512], line[64];
 	int have_ash = Util_fileexists(ASH_CART);
 	int cur = 1, choice;
 
-	if (strcmp(current, "ash") == 0)
-		cur = 2;
-	else if (strcmp(current, "fujinet") == 0)
-		cur = 3;
+	for (choice = 0; choice < 4; choice++)
+		if (strcmp(current, names[choice]) == 0)
+			cur = choice + 1;
 	Util_strlcpy(ash_item, have_ash ? "ASH" : "ASH (not installed)", sizeof ash_item);
 	choice = UI_driver->fSelect("Boot into", UI_SELECT_POPUP, cur, menu, NULL);
 	if (choice < 1 || choice == cur)
 		return FALSE;
-	if (choice == 2 && !have_ash) {
+	if (choice == 3 && !have_ash) {
 		UI_driver->fMessage("ASH is not installed on this stick", TRUE);
 		return FALSE;
 	}
@@ -662,7 +665,7 @@ static int boot_menu(const char *current)
 		UI_driver->fMessage(reply[0] ? reply : "Not available", TRUE);
 		return FALSE;
 	}
-	KMS_HDEV_SetBootTarget(names[choice - 1]);
+	KMS_BOOT_SetTarget(names[choice - 1]);
 	snprintf(line, sizeof line, "Restarting into %s...", boot_label(names[choice - 1]));
 	UI_driver->fMessage(line, FALSE);
 	return TRUE; /* init restarts us now */
@@ -696,6 +699,118 @@ static void tv_menu(void)
 		snprintf(line, sizeof line, "%s, judder on a %.0f Hz screen", name, KMS_VIDEO_refresh);
 	Log_print("sysmenu: TV system: %s", line);
 	UI_driver->fMessage(line, TRUE);
+}
+
+/* ---- display options ---------------------------------------------------- */
+
+/* A popup over NAMES (N of them) with CUR selected; the choice or -1. */
+static int choose(const char *title, const char *const *names, int n, int cur)
+{
+	UI_tMenuItem menu[8];
+	int i;
+	for (i = 0; i < n && i < 7; i++) {
+		menu[i].flags = UI_ITEM_ACTION;
+		menu[i].retval = i;
+		menu[i].prefix = NULL;
+		menu[i].item = (char *)names[i];
+		menu[i].suffix = NULL;
+	}
+	menu[i].flags = UI_ITEM_END; menu[i].retval = 0; menu[i].prefix = NULL; menu[i].item = NULL; menu[i].suffix = NULL;
+	i = UI_driver->fSelect(title, UI_SELECT_POPUP, cur, menu, NULL);
+	return i >= 0 && i < n ? i : -1;
+}
+
+static void display_changed(const char *what)
+{
+	KMS_VIDEO_Relayout(); /* the menu itself is drawn with it: visible at once */
+	CFG_WriteConfig();
+	Log_print("sysmenu: display: %s", what);
+}
+
+/* "Display...": scaling, smoothing, scanlines, borders, TV look. Every
+   change is live and saved (KMS_* keys; the TV look is atari800's
+   ARTIFACT_NTSC). */
+static void display_menu(void)
+{
+	static const char *const scales[] = { "Integer (sharpest)", "Fit (4:3, larger)", "Fill (whole screen)" };
+	static const char *const scans[] = { "Off", "Light (75%)", "Medium (50%)", "Strong (25%)" };
+	static const char *const borders[] = { "Full (384: all of it)", "TV (336, default)", "Tight (320)" };
+	static const char *const looks[] = { "Crisp", "NTSC TV" };
+	static char scale_item[40], smooth_item[40], scan_item[40], border_item[40], look_item[40];
+	static const char *const border_labels[] = { "Full", "TV", "Tight" };
+	int option = 1;
+
+	for (;;) {
+		UI_tMenuItem menu[] = {
+			UI_MENU_ACTION(1, scale_item),
+			UI_MENU_ACTION(2, smooth_item),
+			UI_MENU_ACTION(3, scan_item),
+			UI_MENU_ACTION(4, border_item),
+			UI_MENU_ACTION(5, look_item),
+			UI_MENU_ACTION_ACCEL(6, "Back", "Esc"),
+			UI_MENU_END
+		};
+		int integer = KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER;
+		int pal = Atari800_tv_mode == Atari800_TV_PAL;
+		int v;
+
+		snprintf(scale_item, sizeof scale_item, "Scaling: %s", KMS_VIDEO_ScaleLabel());
+		snprintf(smooth_item, sizeof smooth_item, "Smoothing: %s%s", KMS_VIDEO_smooth ? "Smooth" : "Sharp",
+		         integer ? " (Fit/Fill only)" : "");
+		snprintf(scan_item, sizeof scan_item, "Scanlines: %s%s", KMS_VIDEO_ScanlinesLabel(),
+		         KMS_VIDEO_ScanlinesPossible() ? "" : " (needs 2x)");
+		snprintf(border_item, sizeof border_item, "Borders: %s", border_labels[KMS_VIDEO_borders]);
+		snprintf(look_item, sizeof look_item, "TV look: %s%s", KMS_VIDEO_NtscLook() ? "NTSC TV" : "Crisp",
+		         pal ? " (PAL)" : "");
+
+		option = UI_driver->fSelect("Display", 0, option, menu, NULL);
+		switch (option) {
+		case 1:
+			v = choose("Scaling", scales, 3, KMS_VIDEO_scale_mode);
+			if (v >= 0 && v != KMS_VIDEO_scale_mode) {
+				KMS_VIDEO_scale_mode = v;
+				display_changed(KMS_VIDEO_ScaleLabel());
+			}
+			break;
+		case 2:
+			if (integer) {
+				UI_driver->fMessage("Integer scaling is already sharp", TRUE);
+				break;
+			}
+			KMS_VIDEO_smooth = !KMS_VIDEO_smooth;
+			display_changed(KMS_VIDEO_smooth ? "smooth" : "sharp");
+			break;
+		case 3:
+			v = choose("Scanlines", scans, 4, KMS_VIDEO_scanlines);
+			if (v >= 0 && v != KMS_VIDEO_scanlines) {
+				KMS_VIDEO_scanlines = v;
+				display_changed(scans[v]);
+				if (v != KMS_SCANLINES_OFF && !KMS_VIDEO_ScanlinesPossible())
+					UI_driver->fMessage("Scanlines need a picture 2x high", TRUE);
+			}
+			break;
+		case 4:
+			v = choose("Borders", borders, 3, KMS_VIDEO_borders);
+			if (v >= 0 && v != KMS_VIDEO_borders) {
+				KMS_VIDEO_borders = v;
+				display_changed(borders[v]);
+			}
+			break;
+		case 5:
+			if (pal) {
+				UI_driver->fMessage("NTSC only (TV system is PAL)", TRUE);
+				break;
+			}
+			v = choose("TV look", looks, 2, KMS_VIDEO_NtscLook() ? 1 : 0);
+			if (v >= 0 && v != (KMS_VIDEO_NtscLook() ? 1 : 0) && KMS_VIDEO_SetNtscLook(v == 1)) {
+				CFG_WriteConfig();
+				Log_print("sysmenu: display: TV look %s", looks[v]);
+			}
+			break;
+		default:
+			return;
+		}
+	}
 }
 
 /* ---- install onto the laptop's disk ------------------------------------ */
@@ -863,7 +978,7 @@ static int install_menu(void)
 void KMS_SYSMENU_Run(void)
 {
 	static char fuji_item[48], vol_item[32], bri_item[32], wifi_item[80], ssh_item[48], pw_item[40], info_item[80];
-	static char boot_item[48], tv_item[40];
+	static char boot_item[48], tv_item[40], eject_item[48];
 	int option = 1;
 	int done = FALSE;
 
@@ -878,12 +993,14 @@ void KMS_SYSMENU_Run(void)
 			UI_MENU_ACTION(2, vol_item),
 			UI_MENU_ACTION(3, bri_item),
 			UI_MENU_ACTION(14, tv_item),
+			UI_MENU_SUBMENU(16, "Display..."),
 			UI_MENU_SUBMENU(4, wifi_item),
 			UI_MENU_ACTION(5, ssh_item),
 			UI_MENU_ACTION(11, pw_item),
 			UI_MENU_LABEL(info_item),
 			UI_MENU_ACTION(12, "Hardware status"),
 			UI_MENU_LABEL(""),
+			UI_MENU_ACTION(17, eject_item),
 			UI_MENU_ACTION(13, boot_item),
 			UI_MENU_ACTION(6, "Save logs to the stick"),
 			UI_MENU_ACTION(15, "Install onto this laptop's disk..."),
@@ -912,6 +1029,7 @@ void KMS_SYSMENU_Run(void)
 		}
 
 		snprintf(fuji_item, sizeof fuji_item, "Boot into: %s", boot_label(boot_of(status, buf, sizeof buf)));
+		snprintf(eject_item, sizeof eject_item, "Eject all, back to %s", boot_label(KMS_BOOT_Target()));
 		vol = ALSA_GetVolume();
 		if (vol >= 0)
 			snprintf(vol_item, sizeof vol_item, "Volume: %d%%", vol);
@@ -973,6 +1091,13 @@ void KMS_SYSMENU_Run(void)
 			break;
 		case 14:
 			tv_menu();
+			break;
+		case 16:
+			display_menu();
+			break;
+		case 17:
+			KMS_BOOT_EjectAll();
+			done = TRUE;
 			break;
 		case 5: {
 			int on = strcmp(status_get(status, "ssh", buf, sizeof buf, "off"), "on") == 0;

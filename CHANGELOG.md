@@ -24,3 +24,6 @@ reply all show the version they were built from.
 - Release pipeline: GitHub Actions build, host `-Werror` build and QEMU smoke boot on every push; releases on `v*` tags
 - `scripts/flash.sh`: a safe stick writer for Linux and macOS (removable disks only, type the name, verify by read-back)
 - Install onto the laptop's own disk from the F8 menu (whole disk, type ERASE): one FAT32 partition, boots on BIOS and UEFI (firmware entry "Atari" first in the boot order); `atari.media=<serial>` makes the installed copy win over a stick left plugged in, and a booted stick wins over an installed copy
+- Every route boots what the user asked for: what is in D1: (or a program, cartridge, tape) boots on any cold start, with ASH's cartridge out and BASIC off for that boot; the boot target (BASIC, No BASIC, ASH, FujiNet CONFIG) applies when nothing is mounted; F8 and the Library "Eject all" go back to it; Library "Run with BASIC"; with FujiNet a local D1: wins over FujiNet's drive
+- The Library's first tab is the whole stick (opening in `library/`; FujiNet's SD is `Stick: /fujinet/SD`); Copy to Library, FujiNet SD or a USB drive
+- F8 Display: Integer/Fit/Fill scaling, sharp-bilinear smoothing, scanlines, border width, NTSC TV look (atari800's NTSC filter)

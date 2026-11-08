@@ -43,6 +43,7 @@
 #include "memory.h"
 #include "sio.h"
 #include "util.h"
+#include "kms/kms_boot.h"
 #include "kms/kms_hdev.h"
 
 #define STICK_USER "/media/atari"   /* MEDIA_USER in init/init.c */
@@ -69,7 +70,6 @@ static int text_len = 0;
 static int text_pos = 0;
 
 static int sd_rw = FALSE;          /* XIO 48; off again at every cold start */
-static char boot_target[16] = "";
 static int xex_mounted = FALSE;    /* D1: holds a program from XIO 41 */
 static char xex_name[64] = "";
 
@@ -723,12 +723,7 @@ static int xex_on(void)
 
 static const char *boot_now(void)
 {
-	if (boot_target[0])
-		return boot_target;
-	/* not told yet: the ASH cartridge in means boot=ash */
-	if (cart_in(&CARTRIDGE_main) && Util_striendswith(CARTRIDGE_main.filename, "/ash/ASH.CAR"))
-		return "ash";
-	return "basic";
+	return KMS_BOOT_Target(); /* kms/boot.c */
 }
 
 /* XIO 45: what is mounted where, as a listing. */
@@ -1047,7 +1042,3 @@ void KMS_HDEV_ColdStart(void)
 		drop(h);
 }
 
-void KMS_HDEV_SetBootTarget(const char *target)
-{
-	Util_strlcpy(boot_target, target, sizeof boot_target);
-}

@@ -6,9 +6,16 @@
  *
  * Design: two dumb (CPU-mapped) XRGB8888 buffers on the first connected
  * connector's preferred mode. The 8-bit Atari screen is palette-expanded
- * and scaled on the CPU with nearest-neighbour row/column maps, then shown
+ * and scaled on the CPU with precomputed row/column maps, then shown
  * with a vsync'd page flip. No GPU driver userspace (Mesa) is needed, so
  * this works on every KMS driver including simpledrm.
+ *
+ * Display options (F8 > Display): scaling Integer/Fit/Fill, smoothing
+ * (sharp-bilinear for Fit/Fill: each Atari pixel stays a solid block and
+ * only the panel pixels on its edges are blended), scanlines (every
+ * second panel row of an Atari line darker, from a second palette),
+ * borders (384/336/320 columns) and the NTSC TV look (atari800's Blargg
+ * NTSC filter into a 32-bit row buffer, then the same scaler).
  *
  * Pacing: among the modes at the panel's preferred resolution the one
  * closest to the Atari's frame rate is used (PAL 49.86, NTSC 59.92 Hz).
@@ -51,6 +58,7 @@
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>
 
+#include "artifact.h"
 #include "atari.h"
 #include "colours.h"
 #include "log.h"
@@ -60,8 +68,14 @@
 #include "util.h"
 #include "kms/kms_video.h"
 #include "font_atari.h"
+#ifdef NTSC_FILTER
+#include "filter_ntsc.h"
+#endif
 
 int KMS_VIDEO_scale_mode = KMS_SCALE_INTEGER;
+int KMS_VIDEO_smooth = FALSE;
+int KMS_VIDEO_scanlines = KMS_SCANLINES_OFF;
+int KMS_VIDEO_borders = KMS_BORDERS_TV;
 char KMS_VIDEO_device[256] = "";
 char KMS_VIDEO_driver[32] = "?";
 static char hint_text[80] = "";
@@ -97,19 +111,46 @@ static drmModeCrtc *saved_crtc = NULL;
 static int tty_fd = -1;
 static long tty_saved_mode = -1;
 
-/* Destination rectangle on the panel and nearest-neighbour maps. */
+/* Destination rectangle on the panel and the scaler's maps. */
 static int dst_x, dst_y, dst_w, dst_h;
-static int *xmap = NULL; /* dst column -> src column */
-static int *ymap = NULL; /* dst row -> src row */
-static int int_factor = 0; /* >0 when integer scaling (fast path) */
-static uint32_t *rowbuf = NULL;
+static int *xmap = NULL;    /* dst column -> src column (nearest) */
+static int *xidx = NULL;    /* dst column -> left src column (blended) */
+static int *xwgt = NULL;    /* ... and the right one's weight, 0..256 */
+static int *ya = NULL;      /* dst row -> src row */
+static int *yb = NULL;      /* ... the row blended in (smooth) */
+static int *ywgt = NULL;    /* ... and its weight, 0..256 */
+static unsigned char *ydark = NULL; /* dst row is a scanline */
+static int int_factor = 0;  /* >0 when integer scaling of the 8-bit screen (fast path) */
+static int h_blend = FALSE; /* columns use xidx/xwgt instead of xmap */
+static int lay_ntsc = FALSE; /* the layout reads the NTSC filter's output */
+static int lay_x1 = 24, lay_y1 = 0, lay_sw = 336, lay_sh = 240;
+static int need_clear = 0;  /* buffers to blank (the picture moved) */
+static double vfactor = 1.0;
+
+/* Rows of panel pixels built from one source row, reused for every panel
+   row they cover (least recently used goes first). */
+#define ROW_SLOTS 6
+static struct {
+	int row;  /* source row, -1 = empty */
+	int dim;  /* built from palette_dim */
+	unsigned long used;
+	uint32_t *buf;
+} rows[ROW_SLOTS];
+static unsigned long row_clock = 0;
+static uint32_t *outbuf = NULL;  /* a blended or dimmed row */
 
 static uint32_t palette[256];
+static uint32_t palette_dim[256]; /* scanline rows */
+static unsigned int dim_level = 256; /* brightness of scanline rows, /256 */
+
+/* NTSC TV look: atari800's filter writes 7 pixels per 4 Atari pixels. */
+static uint32_t *ntsc_buf = NULL;
+static int ntsc_w = 0;
 
 /* -kms-debug: frame statistics every few seconds */
 static int debug_stats = FALSE;
 static unsigned long st_frames, st_flips, st_repeats, st_timeouts, st_busy;
-static double st_last;
+static double st_last, st_render;
 /* vblank sequence of the last completed flip, for st_repeats */
 static unsigned int last_seq = 0;
 static int have_seq = FALSE;
@@ -428,12 +469,84 @@ static void pacing_check(void)
 
 /* ---- scaling layout -------------------------------------------------- */
 
+static const char *const scale_names[] = { "integer", "fit", "fill" };
+static const char *const scan_names[] = { "off", "light", "medium", "strong" };
+static const char *const border_names[] = { "full", "tv", "tight" };
+
+/* The NTSC TV look is on and applies (it is NTSC only). */
+static int ntsc_wanted(void)
+{
+#ifdef NTSC_FILTER
+	return Atari800_tv_mode == Atari800_TV_NTSC && ARTIFACT_mode == ARTIFACT_NTSC_FULL;
+#else
+	return FALSE;
+#endif
+}
+
+static uint32_t dim_pixel(uint32_t p, unsigned int k)
+{
+	return ((((p & 0xff00ffu) * k) >> 8) & 0xff00ffu) | ((((p & 0x00ff00u) * k) >> 8) & 0x00ff00u);
+}
+
+static void update_dim_palette(void)
+{
+	static const unsigned int levels[] = { 256, 192, 128, 64 }; /* 100/75/50/25 % */
+	int i;
+	dim_level = levels[KMS_VIDEO_scanlines >= 0 && KMS_VIDEO_scanlines <= 3 ? KMS_VIDEO_scanlines : 0];
+	for (i = 0; i < 256; i++)
+		palette_dim[i] = dim_pixel(palette[i], dim_level);
+}
+
+/* Sharp-bilinear: position X of N destination pixels over M source pixels
+   (scale S = N/M) -> left source index and the weight (0..256) of the
+   next one. The weight only leaves 0/256 within one destination pixel of
+   a source pixel edge, so blocks stay solid and edges get one blended
+   pixel instead of uneven widths. SHARP false: plain linear. */
+static void blend_map(int x, int n, int m, int sharp, int *idx, int *wgt)
+{
+	double s = (double)n / (double)m;
+	double p = ((double)x + 0.5) / s - 0.5;
+	int i = p >= 0 ? (int)p : (int)p - 1;
+	double f = p - i;
+	if (sharp) {
+		f = (f - 0.5) * s + 0.5;
+		if (f < 0) f = 0;
+		if (f > 1) f = 1;
+	}
+	if (i < 0) {
+		i = 0;
+		f = 0;
+	}
+	if (i >= m - 1) {
+		i = m > 1 ? m - 2 : 0;
+		f = m > 1 ? 1 : 0;
+	}
+	*idx = i;
+	*wgt = (int)(f * 256 + 0.5);
+}
+
 static void compute_layout(void)
 {
 	int W = mode.hdisplay, H = mode.vdisplay;
-	int sw = Screen_visible_x2 - Screen_visible_x1;
-	int sh = Screen_visible_y2 - Screen_visible_y1;
-	int x, y;
+	int sw, sh, x, y, i, run = 0;
+	int src_w, smooth;
+
+	switch (KMS_VIDEO_borders) {
+	case KMS_BORDERS_FULL:
+		Screen_visible_x1 = 0;
+		Screen_visible_x2 = Screen_WIDTH;
+		break;
+	case KMS_BORDERS_TIGHT:
+		Screen_visible_x1 = 32;
+		Screen_visible_x2 = 352;
+		break;
+	default:
+		Screen_visible_x1 = 24;
+		Screen_visible_x2 = 360;
+		break;
+	}
+	sw = Screen_visible_x2 - Screen_visible_x1;
+	sh = Screen_visible_y2 - Screen_visible_y1;
 
 	int_factor = 0;
 	switch (KMS_VIDEO_scale_mode) {
@@ -442,11 +555,13 @@ static void compute_layout(void)
 		dst_h = H;
 		break;
 	case KMS_SCALE_FIT:
+		/* the height, and the width the 336-column picture has at 4:3:
+		   the Atari's pixel shape is kept whatever the borders */
 		dst_h = H;
-		dst_w = H * 4 / 3;
+		dst_w = (int)((double)H * 4 * sw / (3.0 * 336) + 0.5);
 		if (dst_w > W) {
 			dst_w = W;
-			dst_h = W * 3 / 4;
+			dst_h = (int)((double)W * 3 * 336 / (4.0 * sw) + 0.5);
 		}
 		break;
 	case KMS_SCALE_INTEGER:
@@ -458,27 +573,134 @@ static void compute_layout(void)
 		int_factor = f;
 		dst_w = sw * f;
 		dst_h = sh * f;
-		if (dst_w > W) dst_w = W;
+		if (dst_w > W) {
+			dst_w = W;
+			int_factor = 0; /* narrower than the screen: the general path */
+		}
 		if (dst_h > H) dst_h = H;
 		break;
 	}
 	}
 	dst_x = (W - dst_w) / 2;
 	dst_y = (H - dst_h) / 2;
+	vfactor = (double)dst_h / sh;
+	lay_x1 = Screen_visible_x1;
+	lay_y1 = Screen_visible_y1;
+	lay_sw = sw;
+	lay_sh = sh;
 
-	free(xmap);
-	free(ymap);
-	free(rowbuf);
+	lay_ntsc = ntsc_wanted();
+	smooth = KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER;
+#ifdef NTSC_FILTER
+	if (lay_ntsc) {
+		ntsc_w = ATARI_NTSC_OUT_WIDTH(sw);
+		free(ntsc_buf);
+		ntsc_buf = Util_malloc((size_t)ntsc_w * sh * sizeof(uint32_t));
+		if (FILTER_NTSC_emu == NULL) {
+			FILTER_NTSC_emu = FILTER_NTSC_New();
+			FILTER_NTSC_Update(FILTER_NTSC_emu);
+		}
+	}
+#endif
+	if (lay_ntsc)
+		int_factor = 0; /* 7 filter pixels per 4 Atari pixels: no integer path */
+	src_w = lay_ntsc ? ntsc_w : sw;
+	/* the filter's output is a smooth signal: always blended across */
+	h_blend = lay_ntsc || smooth;
+
+	free(xmap); free(xidx); free(xwgt);
+	free(ya); free(yb); free(ywgt); free(ydark);
+	free(outbuf);
 	xmap = Util_malloc(dst_w * sizeof(int));
-	ymap = Util_malloc(dst_h * sizeof(int));
-	rowbuf = Util_malloc(dst_w * sizeof(uint32_t));
-	for (x = 0; x < dst_w; x++)
-		xmap[x] = Screen_visible_x1 + x * sw / dst_w;
-	for (y = 0; y < dst_h; y++)
-		ymap[y] = Screen_visible_y1 + y * sh / dst_h;
+	xidx = Util_malloc(dst_w * sizeof(int));
+	xwgt = Util_malloc(dst_w * sizeof(int));
+	ya = Util_malloc(dst_h * sizeof(int));
+	yb = Util_malloc(dst_h * sizeof(int));
+	ywgt = Util_malloc(dst_h * sizeof(int));
+	ydark = Util_malloc(dst_h);
+	outbuf = Util_malloc(dst_w * sizeof(uint32_t));
+	for (i = 0; i < ROW_SLOTS; i++) {
+		free(rows[i].buf);
+		rows[i].buf = Util_malloc(dst_w * sizeof(uint32_t));
+		rows[i].row = -1;
+	}
+	for (x = 0; x < dst_w; x++) {
+		xmap[x] = x * src_w / dst_w;
+		blend_map(x, dst_w, src_w, !lay_ntsc, &xidx[x], &xwgt[x]);
+	}
+	for (y = 0; y < dst_h; y++) {
+		int near = y * sh / dst_h;
+		if (y > 0 && near == (y - 1) * sh / dst_h)
+			run++;
+		else
+			run = 0;
+		/* scanlines: every second panel row of an Atari line, at 2x or more */
+		ydark[y] = KMS_VIDEO_scanlines != KMS_SCANLINES_OFF && vfactor >= 2.0 && (run & 1);
+		if (smooth) {
+			int idx, w;
+			blend_map(y, dst_h, sh, TRUE, &idx, &w);
+			ya[y] = idx;
+			yb[y] = idx + 1 < sh ? idx + 1 : idx;
+			ywgt[y] = w;
+			if (w >= 256) { /* the next row only */
+				ya[y] = yb[y];
+				ywgt[y] = 0;
+			}
+		}
+		else {
+			ya[y] = yb[y] = near;
+			ywgt[y] = 0;
+		}
+	}
+	update_dim_palette();
+	need_clear = 2;
 
-	Log_print("kms: picture %dx%d at %d,%d (%s)", dst_w, dst_h, dst_x, dst_y,
-	          int_factor ? "integer" : KMS_VIDEO_scale_mode == KMS_SCALE_FIT ? "fit" : "stretch");
+	Log_print("kms: picture %dx%d at %d,%d (%s%s, scanlines %s, borders %s%s)", dst_w, dst_h, dst_x, dst_y,
+	          scale_names[KMS_VIDEO_scale_mode], smooth ? " smooth" : "",
+	          vfactor >= 2.0 ? scan_names[KMS_VIDEO_scanlines] : "off (needs 2x)",
+	          border_names[KMS_VIDEO_borders], lay_ntsc ? ", NTSC TV" : "");
+}
+
+void KMS_VIDEO_Relayout(void)
+{
+	if (drm_fd >= 0)
+		compute_layout();
+}
+
+int KMS_VIDEO_ScanlinesPossible(void)
+{
+	return vfactor >= 2.0;
+}
+
+int KMS_VIDEO_NtscLook(void)
+{
+	return ntsc_wanted();
+}
+
+int KMS_VIDEO_SetNtscLook(int on)
+{
+#ifdef NTSC_FILTER
+	if (Atari800_tv_mode != Atari800_TV_NTSC)
+		return FALSE;
+	ARTIFACT_Set(on ? ARTIFACT_NTSC_FULL : ARTIFACT_NONE);
+	KMS_VIDEO_Relayout();
+	return TRUE;
+#else
+	(void)on;
+	return FALSE;
+#endif
+}
+
+const char *KMS_VIDEO_ScaleLabel(void)
+{
+	static const char *const labels[] = { "Integer", "Fit", "Fill" };
+	return labels[KMS_VIDEO_scale_mode >= 0 && KMS_VIDEO_scale_mode <= 2 ? KMS_VIDEO_scale_mode : 0];
+}
+
+const char *KMS_VIDEO_ScanlinesLabel(void)
+{
+	static const char *const labels[] = { "Off", "Light", "Medium", "Strong" };
+	return labels[KMS_VIDEO_scanlines >= 0 && KMS_VIDEO_scanlines <= 3 ? KMS_VIDEO_scanlines : 0];
 }
 
 /* ---- console mode ---------------------------------------------------- */
@@ -519,8 +741,26 @@ int KMS_VIDEO_ReadConfig(char *option, char *parameters)
 	if (strcmp(option, "KMS_SCALE") == 0) {
 		if (strcmp(parameters, "INTEGER") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_INTEGER;
 		else if (strcmp(parameters, "FIT") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_FIT;
-		else if (strcmp(parameters, "STRETCH") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_STRETCH;
+		else if (strcmp(parameters, "STRETCH") == 0 || strcmp(parameters, "FILL") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_STRETCH;
 		else return FALSE;
+	}
+	else if (strcmp(option, "KMS_SMOOTH") == 0)
+		KMS_VIDEO_smooth = Util_sscanbool(parameters) == 1;
+	else if (strcmp(option, "KMS_SCANLINES") == 0) {
+		int i;
+		for (i = 0; i < 4 && Util_stricmp(parameters, scan_names[i]) != 0; i++)
+			;
+		if (i == 4)
+			return FALSE;
+		KMS_VIDEO_scanlines = i;
+	}
+	else if (strcmp(option, "KMS_BORDERS") == 0) {
+		int i;
+		for (i = 0; i < 3 && Util_stricmp(parameters, border_names[i]) != 0; i++)
+			;
+		if (i == 3)
+			return FALSE;
+		KMS_VIDEO_borders = i;
 	}
 	else if (strcmp(option, "KMS_DEVICE") == 0)
 		Util_strlcpy(KMS_VIDEO_device, parameters, sizeof KMS_VIDEO_device);
@@ -533,8 +773,13 @@ int KMS_VIDEO_ReadConfig(char *option, char *parameters)
 
 void KMS_VIDEO_WriteConfig(FILE *fp)
 {
+	static const char *const scan_cfg[] = { "OFF", "LIGHT", "MEDIUM", "STRONG" };
+	static const char *const border_cfg[] = { "FULL", "TV", "TIGHT" };
 	static const char *const names[] = { "INTEGER", "FIT", "STRETCH" };
 	fprintf(fp, "KMS_SCALE=%s\n", names[KMS_VIDEO_scale_mode]);
+	fprintf(fp, "KMS_SMOOTH=%d\n", KMS_VIDEO_smooth);
+	fprintf(fp, "KMS_SCANLINES=%s\n", scan_cfg[KMS_VIDEO_scanlines]);
+	fprintf(fp, "KMS_BORDERS=%s\n", border_cfg[KMS_VIDEO_borders]);
 	if (KMS_VIDEO_device[0])
 		fprintf(fp, "KMS_DEVICE=%s\n", KMS_VIDEO_device);
 	if (KMS_VIDEO_mode_request[0])
@@ -582,7 +827,7 @@ int KMS_VIDEO_Initialise(int *argc, char *argv[])
 				Log_print("\t-kms-debug                Log frame statistics");
 				Log_print("\t-kms-mode WxH[@Hz]        Display mode (default: preferred, rate closest to the Atari)");
 				Log_print("\t-kms-lock <Hz>            Pace by the display within this of the Atari rate (0.75; 0 = off)");
-				Log_print("\t-kms-scale integer|fit|stretch");
+				Log_print("\t-kms-scale integer|fit|fill");
 				Log_print("\t                          How to scale the picture to the panel");
 			}
 			argv[j++] = argv[i];
@@ -661,8 +906,18 @@ void KMS_VIDEO_Exit(void)
 	drm_fd = -1;
 	tty_restore();
 	free(xmap); xmap = NULL;
-	free(ymap); ymap = NULL;
-	free(rowbuf); rowbuf = NULL;
+	free(xidx); xidx = NULL;
+	free(xwgt); xwgt = NULL;
+	free(ya); ya = NULL;
+	free(yb); yb = NULL;
+	free(ywgt); ywgt = NULL;
+	free(ydark); ydark = NULL;
+	free(outbuf); outbuf = NULL;
+	free(ntsc_buf); ntsc_buf = NULL;
+	for (i = 0; i < ROW_SLOTS; i++) {
+		free(rows[i].buf);
+		rows[i].buf = NULL;
+	}
 }
 
 void KMS_VIDEO_PaletteUpdate(void)
@@ -670,6 +925,11 @@ void KMS_VIDEO_PaletteUpdate(void)
 	int i;
 	for (i = 0; i < 256; i++)
 		palette[i] = (uint32_t)Colours_table[i] & 0x00ffffffu; /* XRGB8888 */
+	update_dim_palette();
+#ifdef NTSC_FILTER
+	if (FILTER_NTSC_emu != NULL)
+		FILTER_NTSC_Update(FILTER_NTSC_emu); /* the filter has its own copy of the palette */
+#endif
 }
 
 /* ---- hint overlay ------------------------------------------------------ */
@@ -733,38 +993,122 @@ static void draw_hint(struct dumb_fb *fb)
 
 /* ---- rendering ------------------------------------------------------- */
 
+static uint32_t mix(uint32_t a, uint32_t b, unsigned int w)
+{
+	unsigned int iw = 256 - w;
+	return (((((a & 0xff00ffu) * iw) + ((b & 0xff00ffu) * w)) >> 8) & 0xff00ffu)
+	       | (((((a & 0x00ff00u) * iw) + ((b & 0x00ff00u) * w)) >> 8) & 0x00ff00u);
+}
+
+/* Source row SY (0 = first visible line) across the panel's width; DIM:
+   a scanline row from palette_dim (plain paths only, see get_row()). */
+static void build_row(uint32_t *d, int sy, int dim)
+{
+	int x;
+	if (lay_ntsc) {
+		const uint32_t *s = ntsc_buf + (size_t)sy * ntsc_w;
+		for (x = 0; x < dst_w; x++) {
+			unsigned int w = (unsigned int)xwgt[x];
+			const uint32_t *p = s + xidx[x];
+			d[x] = w == 0 ? p[0] : w >= 256 ? p[1] : mix(p[0], p[1], w);
+		}
+	}
+	else {
+		const UBYTE *s = (const UBYTE *)Screen_atari + (size_t)(lay_y1 + sy) * Screen_WIDTH + lay_x1;
+		const uint32_t *pal = dim ? palette_dim : palette;
+		if (int_factor) {
+			int sx, k;
+			for (sx = 0; sx < lay_sw; sx++) {
+				uint32_t p = pal[s[sx]];
+				for (k = 0; k < int_factor; k++)
+					*d++ = p;
+			}
+		}
+		else if (h_blend) {
+			for (x = 0; x < dst_w; x++) {
+				unsigned int w = (unsigned int)xwgt[x];
+				const UBYTE *p = s + xidx[x];
+				d[x] = w == 0 ? pal[p[0]] : w >= 256 ? pal[p[1]] : mix(pal[p[0]], pal[p[1]], w);
+			}
+		}
+		else
+			for (x = 0; x < dst_w; x++)
+				d[x] = pal[s[xmap[x]]];
+	}
+}
+
+static const uint32_t *get_row(int sy, int dim)
+{
+	const uint32_t *bright = NULL;
+	int i, victim = 0;
+	for (i = 0; i < ROW_SLOTS; i++)
+		if (rows[i].row == sy && rows[i].dim == dim) {
+			rows[i].used = ++row_clock;
+			return rows[i].buf;
+		}
+	/* blended or filtered rows: a scanline is the bright row dimmed */
+	if (dim && (lay_ntsc || h_blend))
+		bright = get_row(sy, FALSE); /* now the most recently used: not the victim */
+	for (i = 1; i < ROW_SLOTS; i++)
+		if (rows[i].used < rows[victim].used)
+			victim = i;
+	if (bright != NULL) {
+		int x;
+		for (x = 0; x < dst_w; x++)
+			rows[victim].buf[x] = dim_pixel(bright[x], dim_level);
+	}
+	else
+		build_row(rows[victim].buf, sy, dim);
+	rows[victim].row = sy;
+	rows[victim].dim = dim;
+	rows[victim].used = ++row_clock;
+	return rows[victim].buf;
+}
+
 static void render(struct dumb_fb *fb)
 {
-	const UBYTE *src = (const UBYTE *)Screen_atari;
-	uint8_t *base = fb->map + (size_t)dst_y * fb->pitch + (size_t)dst_x * 4;
-	int prev_src_row = -1;
-	int y;
-	size_t rowbytes = (size_t)dst_w * 4;
+	uint8_t *base;
+	const uint32_t *line = NULL;
+	int pa = -1, pb = -1, pw = -1, pd = -1;
+	int y, i;
+	size_t rowbytes;
 
-	/* The dumb buffer is write-combined memory: render each distinct source
-	   row once into a cached row buffer, then stream it out with memcpy for
-	   every panel row it covers. Never read back from the framebuffer. */
+	if (lay_ntsc != ntsc_wanted() || lay_x1 != Screen_visible_x1 || lay_sw != Screen_visible_x2 - Screen_visible_x1)
+		compute_layout(); /* the TV system changed, or someone moved the borders */
+	if (need_clear > 0) {
+		memset(fb->map, 0, fb->size);
+		need_clear--;
+	}
+#ifdef NTSC_FILTER
+	if (lay_ntsc)
+		atari_ntsc_blit_argb32(FILTER_NTSC_emu,
+		                       (const ATARI_NTSC_IN_T *)Screen_atari + (size_t)lay_y1 * Screen_WIDTH + lay_x1,
+		                       Screen_WIDTH, lay_sw, lay_sh, ntsc_buf, (long)ntsc_w * 4);
+#endif
+	for (i = 0; i < ROW_SLOTS; i++)
+		rows[i].row = -1; /* a new frame */
+	base = fb->map + (size_t)dst_y * fb->pitch + (size_t)dst_x * 4;
+	rowbytes = (size_t)dst_w * 4;
+
+	/* The dumb buffer is write-combined memory: build each distinct panel
+	   row once in cached memory, then stream it out with memcpy for every
+	   panel row it covers. Never read back from the framebuffer. */
 	for (y = 0; y < dst_h; y++) {
-		int sy = ymap[y];
-		if (sy != prev_src_row) {
-			const UBYTE *s = src + (size_t)sy * Screen_WIDTH;
-			uint32_t *d = rowbuf;
-			if (int_factor) {
-				int sx, k;
-				for (sx = Screen_visible_x1; sx < Screen_visible_x2; sx++) {
-					uint32_t p = palette[s[sx]];
-					for (k = 0; k < int_factor; k++)
-						*d++ = p;
-				}
-			}
-			else {
+		int a = ya[y], b = yb[y], w = ywgt[y], dark = ydark[y];
+		if (a != pa || b != pb || w != pw || dark != pd) {
+			if (w == 0)
+				line = get_row(a, dark);
+			else { /* smooth: a row on the edge between two Atari lines */
+				const uint32_t *ra = get_row(a, dark);
+				const uint32_t *rb = get_row(b, dark);
 				int x;
 				for (x = 0; x < dst_w; x++)
-					d[x] = palette[s[xmap[x]]];
+					outbuf[x] = mix(ra[x], rb[x], (unsigned int)w);
+				line = outbuf;
 			}
-			prev_src_row = sy;
+			pa = a; pb = b; pw = w; pd = dark;
 		}
-		memcpy(base + (size_t)y * fb->pitch, rowbuf, rowbytes);
+		memcpy(base + (size_t)y * fb->pitch, line, rowbytes);
 	}
 }
 
@@ -853,16 +1197,23 @@ void KMS_VIDEO_DisplayScreen(void)
 	wait_flip();
 	pacing_check();
 	back = 1 - front;
-	render(&fbs[back]);
+	if (debug_stats) {
+		double t0 = Util_time();
+		render(&fbs[back]);
+		st_render += Util_time() - t0;
+	}
+	else
+		render(&fbs[back]);
 	draw_hint(&fbs[back]);
 	st_frames++;
 	if (debug_stats) {
 		double now = Util_time();
 		if (now - st_last >= 5.0) {
-			Log_print("kms: %.1f fps, flips %lu, repeats %lu, timeouts %lu, busy %lu, pacing %s",
+			Log_print("kms: %.1f fps, flips %lu, repeats %lu, timeouts %lu, busy %lu, pacing %s, render %.2f ms",
 			          st_frames / (now - st_last), st_flips, st_repeats, st_timeouts, st_busy,
-			          locked_now() ? "display" : "timer");
+			          locked_now() ? "display" : "timer", st_frames ? st_render * 1000.0 / st_frames : 0.0);
 			st_frames = st_flips = st_repeats = st_timeouts = st_busy = 0;
+			st_render = 0;
 			st_last = now;
 		}
 	}

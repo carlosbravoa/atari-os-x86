@@ -123,14 +123,20 @@ OS is used.
 
 ## The Library (F9)
 
-F9 (or the first entry of the F1 menu) opens a browser over three kinds of
-source, cycled with **Tab**: the `library/` folder on the stick, every USB
-drive plugged in (init mounts them under `/media/usb/<label>`; a border hint
-says so when one appears), and FujiNet's `fujinet/SD/` folder. RETURN on a
-folder enters it, Backspace or Esc goes back up; RETURN on a file offers
-**Run**, **Mount as D1:** (or insert the cartridge/tape), **Copy to** any
-other source (keeping the folder path; "Safe to unplug" once it is synced),
-and **Favourite**. The Library root lists the last 8 programs run and the
+F9 (or the first entry of the F1 menu) opens a browser over the sources,
+cycled with **Tab**: **Stick** (the stick's whole `atari/` folder, opening
+in `library/`: FujiNet's downloads are `Stick: /fujinet/SD`, and `disks/`,
+`hdd/`, `ash/` are there too; `config/`, `ssh/` and `logs/` are not shown)
+and every USB drive plugged in (init mounts them under
+`/media/usb/<label>`; a border hint says so when one appears). RETURN on a
+folder enters it, Backspace or `..` goes back up, Esc closes (from
+`library/` or a source's root). RETURN on a file offers **Run**, **Run
+with BASIC** (disk images: for BASIC-based disks such as magazine disks),
+**Mount as D1:** (or insert the cartridge/tape; the next cold start boots
+it), **Copy to Library**, **Copy to FujiNet SD**, **Copy to...** a USB
+drive (keeping the folder path; "Safe to unplug" once it is synced),
+**Favourite**, and **Eject all & reboot** when something is mounted.
+`Stick: /` and `Stick: /library` list the last 8 programs run and the
 favourites (`atari/config/library.cfg`). Multi-disk sets named
 `... (Disk 1)...`, `..._d1...` or `... Side 1...` get disks 2-4 in D2:-D4:.
 A filter entry narrows the listing to matching file names.
@@ -140,8 +146,29 @@ A filter entry narrows the listing to matching file names.
 The laptop boots straight to BASIC `READY`. F8 opens a menu in the same
 style as the emulator's own, backed by PID 1 over a Unix socket:
 
-- **Boot into**: BASIC, ASH (the Atari shell) or FujiNet CONFIG; choosing
-  another one restarts the Atari into it (persists)
+- **Boot into**: BASIC, No BASIC (the XL self test, as when holding
+  OPTION), ASH (the Atari shell) or FujiNet CONFIG; choosing another one
+  restarts the Atari into it (persists). This is what starts when nothing
+  is mounted: **what is in D1: boots**. Every cold start (F1 "Reboot",
+  Shift+F5, the Library, ASH's `reboot`, F8) boots a disk in D1:, a
+  program, a cartridge or a tape set to boot when there is one, with the
+  ASH cartridge taken out and BASIC off for that boot (`Run with BASIC`
+  keeps it on); `ASH.CAR` run by hand boots ASH whatever the target. With
+  `boot=fujinet` a local image in D1:-D8: answers instead of FujiNet's
+  drive (at standard SIO speed: no SIO patch with NetSIO)
+- **Eject all, back to <target>**: empties D1:-D8:, takes out the
+  cartridge (not ASH's own) and the tape, and cold starts into the target
+- **Display...**: **Scaling** Integer (the largest whole factor, default),
+  Fit (the full height at the Atari's shape) or Fill (the whole panel);
+  **Smoothing** Sharp or Smooth for Fit/Fill (sharp-bilinear: pixels stay
+  square blocks, only their edges are blended); **Scanlines** Off, Light,
+  Medium, Strong (every second panel row of an Atari line at 75/50/25 %,
+  from a 2x high picture up); **Borders** Full (384 columns), TV (336,
+  default), Tight (320); **TV look** Crisp or NTSC TV (atari800's NTSC
+  composite filter, NTSC only; the same setting as F1 > Display Settings >
+  "full NTSC filter", `ARTIFACT_NTSC=NTSC-FULL`). Live and saved
+  (`KMS_SCALE`, `KMS_SMOOTH`, `KMS_SCANLINES`, `KMS_BORDERS` in
+  `atari800.cfg`); `-kms-debug` logs the render time per frame
 - **Volume** and **Brightness** sliders (persist in the emulator config)
 - **Wi-Fi**: scan, pick a network, type the password; `wpa_supplicant`
   keeps the network in `atari/config/wpa_supplicant.conf`
@@ -158,9 +185,10 @@ style as the emulator's own, backed by PID 1 over a Unix socket:
   one), so a panel with a 50 Hz mode picks it up for PAL after "Restart
   emulator".
 - **Hardware status** page: machine, CPU, RAM, CPU use (emulator,
-  FujiNet), temperature and package power, video driver and mode, TV
-  system and pacing, sound card, Wi-Fi, IP, battery, boot medium, boot
-  target, kernel
+  FujiNet), temperature and package power, video driver and mode, display
+  options, TV system and pacing, sound card, Wi-Fi, IP, battery, boot
+  medium, boot target, what the last cold start booted (and whether BASIC
+  was on), kernel
 - **Reboot straight back into Atari** (UEFI `BootNext`, a one-shot request
   for the next start only; the machine's boot order is not touched)
 - **Install onto this laptop's disk...** (only when running from a stick
@@ -185,7 +213,7 @@ From another machine:
 ssh -i /media/$USER/ATARI/atari/ssh/id_ed25519 root@<ip shown in the menu>
 ```
 
-Settings live in `atari/config/system.conf` (`boot=basic|ash|fujinet`,
+Settings live in `atari/config/system.conf` (`boot=basic|nobasic|ash|fujinet`,
 `ssh=`; an older `fujinet=1` is read as `boot=fujinet`).
 
 ## ASH
@@ -233,8 +261,8 @@ networks with the laptop's Wi-Fi, the same as the F8 System menu does.
 lists it as the host `SD` (it starts with a `README.TXT`). Files get onto
 it in several ways:
 
-- the Library (F9): pick a file on the stick or a USB drive, **Copy to**
-  FujiNet SD (the tab is titled "FujiNet SD (host SD in CONFIG)");
+- the Library (F9): pick a file on the stick or a USB drive, **Copy to
+  FujiNet SD** (it is `Stick: /fujinet/SD` in the Library);
 - copy them into `atari/fujinet/SD/` with the stick in another computer,
   or over SSH (there is no scp/sftp on the appliance; stream it:
   `ssh root@<ip> 'cat > /media/atari/fujinet/SD/GAME.ATR' < GAME.ATR`);
@@ -259,7 +287,7 @@ restarting itself.
 | F5, Shift+F5 | warm / cold reset |
 | F6, F7 | HELP, BREAK |
 | F8 | System menu (FujiNet, volume, brightness, Wi-Fi, SSH, power) |
-| F9 | Library: browse, run and copy Atari files (stick, USB drives, FujiNet SD) |
+| F9 | Library: browse, run and copy Atari files (the stick, FujiNet SD on it, USB drives) |
 | F10 | screenshot (PCX, saved next to the config) |
 | F11 | toggle arrow keys between cursor keys (default) and joystick 0 |
 | Arrows + left Alt | joystick 0 after F11 (numpad 8/2/4/6 + 0 always) |

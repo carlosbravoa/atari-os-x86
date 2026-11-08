@@ -111,10 +111,11 @@ static int wpa_mon_fd = -1;        /* attached to wpa_supplicant's events */
 static char wifi_err[48] = "";     /* last failure since the last connect */
 static int wifi_scanned = 1;       /* a scan finished since the last connect */
 
-/* What the Atari boots into: BASIC (the plain XL), the ASH shell
-   cartridge, or FujiNet's CONFIG through NetSIO (-netsio). */
-enum { BOOT_BASIC, BOOT_ASH, BOOT_FUJINET };
-static const char *const boot_names[] = { "basic", "ash", "fujinet" };
+/* What the Atari boots into when nothing is mounted: BASIC (the plain
+   XL), No BASIC (the XL self test; the emulator handles it, kms/boot.c),
+   the ASH shell cartridge, or FujiNet's CONFIG through NetSIO (-netsio). */
+enum { BOOT_BASIC, BOOT_ASH, BOOT_FUJINET, BOOT_NOBASIC, BOOT_COUNT };
+static const char *const boot_names[] = { "basic", "ash", "fujinet", "nobasic" };
 
 /* Persisted settings (system.conf on the stick). */
 static struct {
@@ -315,6 +316,8 @@ static void load_sysconf(void)
 		conf.boot = BOOT_ASH;
 	else if (strstr(buf, "boot=fujinet") || strstr(buf, "fujinet=1"))
 		conf.boot = BOOT_FUJINET;
+	else if (strstr(buf, "boot=nobasic"))
+		conf.boot = BOOT_NOBASIC;
 	conf.ssh = strstr(buf, "ssh=1") != NULL;
 	{
 		char *p = strstr(buf, "rootpw=");
@@ -2929,10 +2932,10 @@ static void ctl_handle(int fd)
 		int b;
 		const char *want = strncmp(line, "boot ", 5) == 0 ? line + 5 :
 		                   strcmp(line, "fujinet on") == 0 ? "fujinet" : "basic";
-		for (b = 0; b < 3 && strcmp(want, boot_names[b]) != 0; b++)
+		for (b = 0; b < BOOT_COUNT && strcmp(want, boot_names[b]) != 0; b++)
 			;
-		if (b == 3) {
-			reply(fd, "ERR usage: boot basic|ash|fujinet\n");
+		if (b == BOOT_COUNT) {
+			reply(fd, "ERR usage: boot basic|nobasic|ash|fujinet\n");
 			return;
 		}
 		if (b == BOOT_FUJINET && !fujinet_enabled) {
