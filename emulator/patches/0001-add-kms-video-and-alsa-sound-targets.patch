@@ -127,21 +127,22 @@ index a1491602..5eb2310d 100644
  atari800_SOURCES += dos/atari_vga.c dos/vga_gfx.c dos/vga_gfx.h dos/vga_asm.s dos/dos_ints.h
  endif
 diff --git a/src/atari.c b/src/atari.c
-index 63910a89..dd0a49fd 100644
+index 63910a89..a05ae075 100644
 --- a/src/atari.c
 +++ b/src/atari.c
-@@ -154,6 +154,10 @@
+@@ -154,6 +154,11 @@
  #ifdef SDL
  #include "sdl/init.h"
  #endif
 +#ifdef KMS
 +#include "kms/kms_boot.h"
 +#include "kms/kms_hdev.h"
++#include "kms/kms_video.h"
 +#endif
  #ifdef NETSIO
  #include "netsio.h"
  
-@@ -264,6 +268,11 @@ void Atari800_Warmstart(void)
+@@ -264,6 +269,11 @@ void Atari800_Warmstart(void)
  
  void Atari800_Coldstart(void)
  {
@@ -153,7 +154,7 @@ index 63910a89..dd0a49fd 100644
  	PBI_Reset();
  	PIA_Reset();
  	ANTIC_Reset();
-@@ -296,6 +305,9 @@ void Atari800_Coldstart(void)
+@@ -296,6 +306,9 @@ void Atari800_Coldstart(void)
  	if(netsio_enabled)
  		netsio_cold_reset();
  #endif /* NETSIO */
@@ -163,7 +164,21 @@ index 63910a89..dd0a49fd 100644
  }
  
  int Atari800_LoadImage(const char *filename, UBYTE *buffer, int nbytes)
-@@ -1288,6 +1300,14 @@ void Atari800_Sync(void)
+@@ -1283,11 +1296,28 @@ void Atari800_Sync(void)
+ 	curtime = Util_time();
+ 	if (Atari800_auto_frameskip)
+ 		autoframeskip(curtime, lasttime);
++#ifdef KMS
++	/* atari-os-x86 low latency: this frame already waited for the vblank
++	   before its input was read (kms/main.c); a sleep here would only
++	   delay the picture. */
++	if (KMS_VIDEO_TakeFramePaced()) {
++		lasttime = curtime;
++		return;
++	}
++#endif
+ 	Util_sleep(lasttime - curtime);
+ 	curtime = Util_time();
  
  	if ((lasttime + deltatime) < curtime)
  		lasttime = curtime;

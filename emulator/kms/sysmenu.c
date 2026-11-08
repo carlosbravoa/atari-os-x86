@@ -29,7 +29,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sched.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
@@ -43,6 +47,9 @@
 #include "log.h"
 #include "platform.h"
 #include "sio.h"
+#ifdef SOUND
+#include "sound.h"
+#endif
 #include "ui.h"
 #include "util.h"
 #include "kms/kms_boot.h"
@@ -66,6 +73,7 @@ int KMS_SYSMENU_brightness = -1;
 int KMS_SYSMENU_hint_done = FALSE;
 int KMS_SYSMENU_advanced_open = FALSE;
 int KMS_SYSMENU_reopen = FALSE;
+int KMS_SYSMENU_low_latency = TRUE;
 
 /* ---- talking to PID 1 ------------------------------------------------ */
 
@@ -236,6 +244,12 @@ int KMS_SYSMENU_ReadConfig(char *option, char *parameters)
 		KMS_SYSMENU_brightness = Util_sscandec(parameters);
 	else if (strcmp(option, "KMS_HINT_DONE") == 0)
 		KMS_SYSMENU_hint_done = Util_sscanbool(parameters) == 1;
+	else if (strcmp(option, "KMS_LOW_LATENCY") == 0) {
+		int v = Util_sscanbool(parameters);
+		if (v == -1)
+			return FALSE;
+		KMS_SYSMENU_low_latency = v;
+	}
 	else
 		return FALSE;
 	return TRUE;
@@ -248,6 +262,87 @@ void KMS_SYSMENU_WriteConfig(FILE *fp)
 	if (KMS_SYSMENU_brightness >= 0)
 		fprintf(fp, "KMS_BRIGHTNESS=%d\n", KMS_SYSMENU_brightness);
 	fprintf(fp, "KMS_HINT_DONE=%d\n", KMS_SYSMENU_hint_done);
+	fprintf(fp, "KMS_LOW_LATENCY=%d\n", KMS_SYSMENU_low_latency);
+}
+
+/* ---- low latency ------------------------------------------------------ */
+
+#ifndef SCHED_RESET_ON_FORK
+#define SCHED_RESET_ON_FORK 0x40000000
+#endif
+
+static int rt_state = -1;     /* scheduling applied: -1 not yet, 0 normal, 1 fifo */
+static int power_sent = -1;   /* the mode init last accepted, -1 none */
+static double power_next = 0; /* next try while init does not answer */
+static int power_tries = 0;
+
+/* SCHED_FIFO 10 for this (main) thread, reset on fork so nothing the
+   emulator starts inherits it; memory locked; 50 us timer slack. Each
+   step may fail (QEMU, a kernel without RT): logged, then carry on. */
+static void set_realtime(int on)
+{
+	struct sched_param sp;
+	char fifo[48], lock[24];
+	int r;
+
+	if (on == rt_state)
+		return;
+	rt_state = on;
+	memset(&sp, 0, sizeof sp);
+	sp.sched_priority = on ? 10 : 0;
+	/* the system call itself: musl's sched_setscheduler() is a stub
+	   (ENOSYS), and this is per thread, which is what is wanted */
+	r = (int)syscall(SYS_sched_setscheduler, 0, (on ? SCHED_FIFO : SCHED_OTHER) | SCHED_RESET_ON_FORK, &sp);
+	if (r == 0)
+		snprintf(fifo, sizeof fifo, on ? "fifo 10" : "normal");
+	else
+		snprintf(fifo, sizeof fifo, "%s failed (%s)", on ? "fifo" : "normal", strerror(errno));
+	r = prctl(PR_SET_TIMERSLACK, on ? 50000UL : 0UL, 0, 0, 0); /* 0: back to the default */
+	if (on) {
+		if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+			snprintf(lock, sizeof lock, "mlockall ok");
+		else
+			snprintf(lock, sizeof lock, "mlockall %s", strerror(errno));
+	}
+	else {
+		munlockall();
+		snprintf(lock, sizeof lock, "munlockall");
+	}
+	Log_print("sched: %s, timerslack %s, %s", fifo, r == 0 ? (on ? "50us" : "default") : "failed", lock);
+}
+
+static void send_power(void)
+{
+	char reply[128];
+	int want = KMS_SYSMENU_low_latency;
+	if (power_sent == want || power_tries >= 30 || Util_time() < power_next)
+		return;
+	power_tries++;
+	power_next = Util_time() + 2.0;
+	if (ctl_request(want ? "power fast" : "power quiet", reply, sizeof reply)) {
+		power_sent = want;
+		power_tries = 0;
+	}
+}
+
+void KMS_SYSMENU_LatencyPoll(void)
+{
+	/* turbo runs flat out: never as a real-time task */
+	set_realtime(KMS_SYSMENU_low_latency && !Atari800_turbo);
+	send_power();
+}
+
+void KMS_SYSMENU_ApplyLowLatency(void)
+{
+	power_tries = 0;
+	power_next = 0;
+	KMS_SYSMENU_LatencyPoll();
+#ifdef SOUND
+	/* the period and buffer sizes are chosen when the card is opened
+	   (sound_alsa.c); the main loop resumes the sound after the menu */
+	if (Sound_enabled)
+		Sound_Setup();
+#endif
 }
 
 void KMS_SYSMENU_ApplySettings(void)
@@ -376,9 +471,27 @@ static size_t hardware_lines(const char *status, char *page, size_t size)
 			if (strcmp(temp, "n/a") != 0)
 				len += (size_t)snprintf(line + len, sizeof line - len, ", %s C", temp);
 			if (strcmp(watts, "n/a") != 0)
-				snprintf(line + len, sizeof line - len, ", %s W", watts);
+				len += (size_t)snprintf(line + len, sizeof line - len, ", %s W", watts);
+			/* init's CPU mode ("power fast|quiet"), on the line if it fits */
+			status_get(status, "power", w, sizeof w, "");
+			if (w[0] && len + strlen(w) + 2 <= 38)
+				snprintf(line + len, sizeof line - len, ", %s", w);
 			add_line(page, &n, size, "%s", line);
+			if (w[0] && len + strlen(w) + 2 > 38)
+				add_line(page, &n, size, "  %s", w);
 		}
+	}
+	{
+		double avg, max, emu, wait;
+		int cnt;
+		if (KMS_VIDEO_Latency(&avg, &max, &cnt))
+			add_line(page, &n, size, "Input lag: %.0f ms avg, %.0f max (%d)", avg, max, cnt);
+		else
+			add_line(page, &n, size, "Input lag: no input yet");
+		if (KMS_VIDEO_FrameTimes(&emu, &wait))
+			add_line(page, &n, size, "Frame: %.1f ms emu, %.0f ms wait", emu, wait);
+		if (KMS_VIDEO_Wake(&avg, &emu, &max)) /* p50, p99, max */
+			add_line(page, &n, size, "Wake: %.2f ms p50, %.2f p99, %.1f max", avg, emu, max);
 	}
 	add_line(page, &n, size, "Display: %s %dx%d @ %.4g Hz", KMS_VIDEO_driver, KMS_VIDEO_width, KMS_VIDEO_height, KMS_VIDEO_refresh);
 	KMS_VIDEO_ScaleFactors(w, sizeof w);
@@ -1196,19 +1309,20 @@ static void controls_changed(const char *what)
 }
 
 /* "Controls...": arrows as cursor keys or joystick 0 (the F11 state),
-   keyboard type PC or Atari, which joystick gamepad 1 drives, and the
-   gamepad mapping. Live and saved (KMS_ARROWS_JOYSTICK, KMS_KEYBOARD,
-   KMS_PAD_SWAP). */
+   keyboard type PC or Atari, low latency on or off, which joystick
+   gamepad 1 drives, and the gamepad mapping. Live and saved
+   (KMS_ARROWS_JOYSTICK, KMS_KEYBOARD, KMS_LOW_LATENCY, KMS_PAD_SWAP). */
 static void controls_menu(void)
 {
 	static const char *const kbds[] = { "PC (keys type their caps)", "Atari (positional)" };
-	static char arrows_item[40], kbd_item[40], pad_item[40];
+	static char arrows_item[40], kbd_item[40], lat_item[40], pad_item[40];
 	int option = 1;
 
 	for (;;) {
 		UI_tMenuItem menu[] = {
 			UI_MENU_ACTION_ACCEL(1, arrows_item, "F11"),
 			UI_MENU_ACTION(2, kbd_item),
+			UI_MENU_ACTION(6, lat_item),
 			UI_MENU_ACTION(3, pad_item),
 			UI_MENU_ACTION(4, "Gamepad buttons"),
 			UI_MENU_ACTION_ACCEL(5, "Back", "Esc"),
@@ -1218,6 +1332,7 @@ static void controls_menu(void)
 
 		snprintf(arrows_item, sizeof arrows_item, "Arrows: %s", KMS_INPUT_arrows_joystick ? "joystick 0" : "cursor keys");
 		snprintf(kbd_item, sizeof kbd_item, "Keyboard type: %s", KMS_INPUT_keyboard_pc ? "PC" : "Atari");
+		snprintf(lat_item, sizeof lat_item, "Low latency: %s", KMS_SYSMENU_low_latency ? "on" : "off");
 		snprintf(pad_item, sizeof pad_item, "Gamepad 1 drives: joystick %d", KMS_INPUT_pad_swap ? 1 : 0);
 
 		option = UI_driver->fSelect("Controls", 0, option, menu, NULL);
@@ -1239,6 +1354,11 @@ static void controls_menu(void)
 			break;
 		case 4:
 			KMS_HELP_GamepadPage();
+			break;
+		case 6:
+			KMS_SYSMENU_low_latency = !KMS_SYSMENU_low_latency;
+			controls_changed(KMS_SYSMENU_low_latency ? "low latency on" : "low latency off");
+			KMS_SYSMENU_ApplyLowLatency();
 			break;
 		default:
 			return;

@@ -40,7 +40,7 @@ ESP_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
 SB_VAR=SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
 # Kernel options when the image's limine.conf cannot be read (the same as
 # scripts/mkimage.sh writes into the first entry).
-DEFAULT_CMDLINE='quiet loglevel=3 drm_kms_helper.fbdev_emulation=0 vt.global_cursor_default=0 i915.enable_psr=1 i915.enable_fbc=1 nmi_watchdog=0'
+DEFAULT_CMDLINE='quiet loglevel=3 drm_kms_helper.fbdev_emulation=0 vt.global_cursor_default=0 i915.enable_psr=0 i915.enable_fbc=1 nmi_watchdog=0 usbhid.jspoll=1 usbhid.kbpoll=1 usbhid.mousepoll=1'
 
 if [ -t 2 ]; then
 	RED=$(printf '\033[1;31m') BLUE=$(printf '\033[1;34m') YEL=$(printf '\033[1;33m') OFF=$(printf '\033[0m')

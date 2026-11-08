@@ -43,6 +43,7 @@
 #include <unistd.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <linux/input.h>
 
 #include "akey.h"
@@ -64,6 +65,12 @@ int KMS_INPUT_pad_swap = FALSE;        /* gamepad 1 drives joystick 1 and gamepa
 int KMS_INPUT_menu_owner = 0;          /* 1, 8 or 9: the F-key whose menu is open (0: none) */
 int KMS_INPUT_close_menus = FALSE;     /* F1/F8/F9 inside a menu: close it (see menu_key) */
 static int debug_keys = FALSE; /* -evdev-debug: log every key event */
+/* Input lag (kms/video.c): the clock the devices stamp their events with
+   (KMS_INPUT_SetClock) and the oldest press, release or stick move read
+   since KMS_INPUT_TakeEventTime last asked, in seconds (0: none). */
+static int ev_clock = CLOCK_REALTIME;
+static double ev_oldest = 0;
+static int devs_ready = FALSE; /* devs[] initialised */
 
 #define INPUT_DIR "/dev/input"
 #define MAX_DEVS 32
@@ -212,6 +219,10 @@ static void open_dev(const char *name)
 	Util_strlcpy(devs[i].name, name, sizeof devs[i].name);
 	desc[0] = '\0';
 	xioctl(fd, EVIOCGNAME(sizeof desc), desc);
+	if (ev_clock != CLOCK_REALTIME) {
+		int clk = ev_clock;
+		xioctl(fd, EVIOCSCLOCKID, &clk); /* stamps comparable with the page flips' */
+	}
 
 	if (type == DEV_KEYBOARD) {
 		xioctl(fd, EVIOCGRAB, (void *)1);
@@ -283,9 +294,19 @@ static int axis_dir(int value, int lo, int hi)
 	return 0;
 }
 
+/* An event that changes what the Atari sees: remember its kernel stamp
+   if it is the oldest not yet taken. */
+static void note_event(const struct input_event *ev)
+{
+	double t = (double)ev->input_event_sec + (double)ev->input_event_usec / 1e6;
+	if (t > 0 && (ev_oldest == 0 || t < ev_oldest))
+		ev_oldest = t;
+}
+
 static void pad_event(struct pad_state *p, const struct input_event *ev)
 {
 	if (ev->type == EV_ABS) {
+		int x = p->x, y = p->y, hx = p->hx, hy = p->hy;
 		switch (ev->code) {
 		case ABS_X: p->x = axis_dir(ev->value, p->xmin, p->xmax); break;
 		case ABS_Y: p->y = axis_dir(ev->value, p->ymin, p->ymax); break;
@@ -293,9 +314,14 @@ static void pad_event(struct pad_state *p, const struct input_event *ev)
 		case ABS_HAT0Y: p->hy = ev->value < 0 ? -1 : ev->value > 0 ? 1 : 0; break;
 		default: break;
 		}
+		/* analogue jitter inside the dead zone is not input */
+		if (x != p->x || y != p->y || hx != p->hx || hy != p->hy)
+			note_event(ev);
 	}
 	else if (ev->type == EV_KEY) {
 		int down = ev->value != 0;
+		if (ev->value == 0 || ev->value == 1)
+			note_event(ev);
 		switch (ev->code) {
 		case BTN_SOUTH:   /* == BTN_A, BTN_GAMEPAD */
 		case BTN_TRIGGER: /* == BTN_JOYSTICK */
@@ -337,6 +363,8 @@ static void key_event(const struct input_event *ev)
 		return;
 	if (media_key(ev))
 		return;
+	if (ev->value == 0 || ev->value == 1)
+		note_event(ev);
 	if (ev->value == 1) {
 		keystate[ev->code / 8] |= (uint8_t)(1u << (ev->code % 8));
 		lastkey = ev->code;
@@ -784,6 +812,27 @@ static int keyboard_inner(void)
 	return translate(lastkey, shift, ctrl);
 }
 
+/* ---- input lag ------------------------------------------------------- */
+
+void KMS_INPUT_SetClock(int clock_id)
+{
+	int i;
+	ev_clock = clock_id;
+	ev_oldest = 0;
+	for (i = 0; devs_ready && i < MAX_DEVS; i++) {
+		int clk = clock_id;
+		if (devs[i].fd >= 0)
+			xioctl(devs[i].fd, EVIOCSCLOCKID, &clk);
+	}
+}
+
+double KMS_INPUT_TakeEventTime(void)
+{
+	double t = ev_oldest;
+	ev_oldest = 0;
+	return t;
+}
+
 /* ---- config / lifecycle ---------------------------------------------- */
 
 int KMS_INPUT_ReadConfig(char *option, char *parameters)
@@ -826,6 +875,7 @@ int KMS_INPUT_Initialise(int *argc, char *argv[])
 	}
 	for (i = 0; i < MAX_PADS; i++)
 		pad_owner[i] = -1;
+	devs_ready = TRUE;
 
 	for (i = j = 1; i < *argc; i++) {
 		if (strcmp(argv[i], "-arrows-joystick") == 0)

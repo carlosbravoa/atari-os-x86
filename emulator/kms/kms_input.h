@@ -41,6 +41,15 @@ void KMS_INPUT_WriteConfig(FILE *fp);
    INPUT_key_shift / INPUT_key_consol. */
 int KMS_INPUT_Keyboard(void);
 
+/* Input lag (kms/video.c measures it): CLOCK_ID (CLOCK_MONOTONIC or
+   CLOCK_REALTIME) is the clock every device stamps its events with, the
+   same as the page flips' (set before or after Initialise). TakeEventTime
+   returns the kernel time, in seconds, of the oldest key press/release,
+   button or stick change read since the last call, and forgets it; 0
+   when there was none. */
+void KMS_INPUT_SetClock(int clock_id);
+double KMS_INPUT_TakeEventTime(void);
+
 /* Joystick state: num 0 = sticks 0/1, 1 = sticks 2/3. */
 int KMS_INPUT_Port(int num);
 int KMS_INPUT_Trig(int num);

@@ -20,6 +20,15 @@
   The Alt+letter shortcuts shown in atari800's own menu (F8 > Advanced)
   are not bound, and never were. The Help page names the Atari key "Win /
   key left of 1": the Atari font has no backtick to print.
+- **Input lag figures** (Hardware page, `-kms-debug`): from the kernel's
+  time stamp of the event to the vblank the frame was flipped on. Not in
+  them: the USB poll interval before the event (1 ms with the new kernel
+  options, the device's own scan time unknown) and the panel's scan-out
+  and pixel response time (often 5-15 ms more on laptop panels). With
+  Low latency on, the CPU runs at full performance preference and the
+  fan may be heard more; switch it off in F8 > Controls. In QEMU the
+  numbers are indicative only (no real panel). The display waits only
+  apply when the display paces the emulator (60 Hz panel, NTSC).
 - **Old i3 (Broadwell) laptop**: blurry picture (firmware framebuffer, i915
   probably not taking over) and a firmware "self test" screen after one
   boot. No logs captured yet.

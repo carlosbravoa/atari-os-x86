@@ -67,6 +67,8 @@
 #include "screen.h"
 #include "ui.h"
 #include "util.h"
+#include "kms/kms_input.h"
+#include "kms/kms_sysmenu.h"
 #include "kms/kms_video.h"
 #include "font_atari.h"
 #ifdef NTSC_FILTER
@@ -157,6 +159,40 @@ static double st_last, st_render;
 /* vblank sequence of the last completed flip, for st_repeats */
 static unsigned int last_seq = 0;
 static int have_seq = FALSE;
+
+/* Input lag (kms/main.c feeds it): the clock both the flip events and the
+   evdev events use, the oldest input stamp of the frame being built and of
+   the flip in flight, and rings of the last LAT_RING latency samples and
+   frame times (emulate + blit, and time spent waiting). */
+#define LAT_RING 120
+static clockid_t lat_clock = CLOCK_REALTIME;
+static double frame_input_ts = 0, flip_input_ts = 0;
+static double lat_ring[LAT_RING];
+static int lat_n = 0, lat_pos = 0;
+static double fr_emu[LAT_RING], fr_wait[LAT_RING];
+static int fr_n = 0, fr_pos = 0;
+static double frame_waited = 0; /* seconds slept or waited this frame */
+static int frame_paced = FALSE; /* the vblank wait came first (KMS_VIDEO_WaitFrame) */
+static double st_lat_last = 0;
+/* Wake-up error (scheduling jitter): how late a timed sleep returned past
+   its request, or how long after the flip's vblank stamp the loop ran
+   again after waiting for it; the last WAKE_RING samples. */
+#define WAKE_RING 600
+static double wake_ring[WAKE_RING];
+static int wake_n = 0, wake_pos = 0;
+static double last_flip_ts = 0; /* vblank stamp of the last flip event */
+
+static void wake_sample(double late)
+{
+	if (late < 0)
+		late = 0;
+	if (late > 1.0) /* stopped for a menu or a suspend: not jitter */
+		return;
+	wake_ring[wake_pos] = late;
+	wake_pos = (wake_pos + 1) % WAKE_RING;
+	if (wake_n < WAKE_RING)
+		wake_n++;
+}
 
 /* Refresh rates of the modes at the chosen resolution (TV system menu). */
 #define MAX_CAND 16
@@ -1015,6 +1051,14 @@ int KMS_VIDEO_Initialise(int *argc, char *argv[])
 		KMS_VIDEO_refresh = mode_hz(&mode);
 
 	saved_crtc = drmModeGetCrtc(drm_fd, crtc_id);
+	{
+		/* Flip events carry CLOCK_MONOTONIC stamps on every modern kernel;
+		   the input devices are switched to the same clock. */
+		uint64_t mono = 0;
+		lat_clock = drmGetCap(drm_fd, DRM_CAP_TIMESTAMP_MONOTONIC, &mono) == 0 && mono ? CLOCK_MONOTONIC : CLOCK_REALTIME;
+		KMS_INPUT_SetClock(lat_clock);
+		Log_print("kms: timestamps %s", lat_clock == CLOCK_MONOTONIC ? "monotonic" : "realtime");
+	}
 
 	for (i = 0; i < 2; i++) {
 		if (!create_fb(&fbs[i], mode.hdisplay, mode.vdisplay)) {
@@ -1264,13 +1308,35 @@ static void render(struct dumb_fb *fb)
 	}
 }
 
+static void lat_sample(double shown)
+{
+	double d = shown - flip_input_ts;
+	flip_input_ts = 0;
+	if (d < 0 || d > 1.0) /* a clock mismatch or a pause: not a sample */
+		return;
+	lat_ring[lat_pos] = d;
+	lat_pos = (lat_pos + 1) % LAT_RING;
+	if (lat_n < LAT_RING)
+		lat_n++;
+}
+
+static double clock_now(void)
+{
+	struct timespec ts;
+	clock_gettime(lat_clock, &ts);
+	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 /* FRAME is the vblank sequence the flip landed on: a gap of more than one
    since the previous flip means the panel showed a picture again (judder
    when the Atari and the panel run at different rates). */
 static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void *data)
 {
-	(void)fd; (void)sec; (void)usec; (void)data;
+	(void)fd; (void)data;
 	flip_pending = 0;
+	last_flip_ts = (double)sec + (double)usec / 1e6;
+	if (flip_input_ts > 0)
+		lat_sample((double)sec + (double)usec / 1e6);
 	if (frame != 0 && have_seq) {
 		unsigned int gap = frame - last_seq;
 		if (gap > 1 && gap < 120) /* longer: a pause (menu), not judder */
@@ -1284,7 +1350,9 @@ static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsi
 static int flip_wait_for(double max_s)
 {
 	drmEventContext ev;
-	double until = Util_time() + max_s;
+	double start = Util_time(), until = start + max_s;
+	double start_clk = clock_now(); /* for the wake-up error */
+	int done = TRUE;
 	memset(&ev, 0, sizeof ev);
 	ev.version = 2;
 	ev.page_flip_handler = page_flip_handler;
@@ -1294,8 +1362,10 @@ static int flip_wait_for(double max_s)
 		struct timeval tv;
 		double left = until - Util_time();
 		int r;
-		if (left <= 0)
-			return FALSE;
+		if (left <= 0) {
+			done = FALSE;
+			break;
+		}
 		FD_ZERO(&fds);
 		FD_SET(drm_fd, &fds);
 		tv.tv_sec = (long)left;
@@ -1303,11 +1373,18 @@ static int flip_wait_for(double max_s)
 		r = select(drm_fd + 1, &fds, NULL, NULL, &tv);
 		if (r < 0 && errno == EINTR)
 			continue;
-		if (r <= 0)
-			return FALSE;
+		if (r <= 0) {
+			done = FALSE;
+			break;
+		}
 		drmHandleEvent(drm_fd, &ev);
 	}
-	return TRUE;
+	/* woken by the flip: the delay from its vblank to running again (not
+	   when the flip had landed before we started waiting) */
+	if (done && last_flip_ts >= start_clk)
+		wake_sample(clock_now() - last_flip_ts);
+	frame_waited += Util_time() - start;
+	return done;
 }
 
 static void wait_flip(void)
@@ -1316,6 +1393,7 @@ static void wait_flip(void)
 		flip_pending = 0;
 		have_seq = FALSE;
 		st_timeouts++;
+		flip_input_ts = 0;
 	}
 }
 
@@ -1328,6 +1406,7 @@ static void wait_flip(void)
 void PLATFORM_Sleep(double s)
 {
 	struct timespec ts;
+	double t0;
 	if (s <= 0)
 		return;
 	if (flip_pending && drm_fd >= 0 && locked_now()) {
@@ -1336,7 +1415,120 @@ void PLATFORM_Sleep(double s)
 	}
 	ts.tv_sec = (time_t)s;
 	ts.tv_nsec = (long)((s - (double)ts.tv_sec) * 1e9);
+	t0 = Util_time();
 	nanosleep(&ts, NULL);
+	t0 = Util_time() - t0;
+	frame_waited += t0;
+	wake_sample(t0 - s);
+}
+
+/* ---- input lag ------------------------------------------------------- */
+
+/* Low latency (kms/main.c): wait for the flip of the previous frame before
+   the input is read, so the frame emulated next starts from fresh input
+   right after a vblank. atari800's frame sleep then has nothing left to
+   wait for (KMS_VIDEO_TakeFramePaced). */
+void KMS_VIDEO_WaitFrame(void)
+{
+	frame_paced = FALSE;
+	if (drm_fd < 0 || !flip_pending || !locked_now())
+		return;
+	wait_flip();
+	frame_paced = TRUE;
+}
+
+int KMS_VIDEO_TakeFramePaced(void)
+{
+	int paced = frame_paced && locked_now();
+	frame_paced = FALSE;
+	return paced;
+}
+
+void KMS_VIDEO_FrameInput(double t)
+{
+	if (t > 0 && (frame_input_ts == 0 || t < frame_input_ts))
+		frame_input_ts = t;
+}
+
+void KMS_VIDEO_FrameDone(double total, int valid)
+{
+	double wait = frame_waited;
+	frame_waited = 0;
+	frame_paced = FALSE;
+	if (!valid)
+		return;
+	if (wait > total)
+		wait = total;
+	fr_emu[fr_pos] = total - wait;
+	fr_wait[fr_pos] = wait;
+	fr_pos = (fr_pos + 1) % LAT_RING;
+	if (fr_n < LAT_RING)
+		fr_n++;
+	if (debug_stats) {
+		double now = Util_time();
+		if (st_lat_last == 0)
+			st_lat_last = now;
+		else if (now - st_lat_last >= 5.0) {
+			double avg, max, emu, w, p50, p99, wmax;
+			int n;
+			st_lat_last = now;
+			KMS_VIDEO_Latency(&avg, &max, &n);
+			KMS_VIDEO_FrameTimes(&emu, &w);
+			KMS_VIDEO_Wake(&p50, &p99, &wmax);
+			Log_print("kms: input lag %.1f ms avg, %.1f max (%d), frame %.2f ms emu, %.2f ms wait,"
+			          " wake %.3f ms p50, %.3f p99, %.3f max, alsa underruns %u",
+			          avg, max, n, emu, w, p50, p99, wmax, ALSA_Underruns());
+		}
+	}
+}
+
+int KMS_VIDEO_Latency(double *avg_ms, double *max_ms, int *n)
+{
+	double sum = 0, max = 0;
+	int i;
+	for (i = 0; i < lat_n; i++) {
+		sum += lat_ring[i];
+		if (lat_ring[i] > max)
+			max = lat_ring[i];
+	}
+	*avg_ms = lat_n ? sum * 1000.0 / lat_n : 0;
+	*max_ms = max * 1000.0;
+	*n = lat_n;
+	return lat_n > 0;
+}
+
+static int cmp_double(const void *a, const void *b)
+{
+	double x = *(const double *)a, y = *(const double *)b;
+	return x < y ? -1 : x > y;
+}
+
+int KMS_VIDEO_Wake(double *p50_ms, double *p99_ms, double *max_ms)
+{
+	static double sorted[WAKE_RING];
+	int n = wake_n;
+	*p50_ms = *p99_ms = *max_ms = 0;
+	if (n == 0)
+		return FALSE;
+	memcpy(sorted, wake_ring, sizeof sorted[0] * (size_t)n);
+	qsort(sorted, (size_t)n, sizeof sorted[0], cmp_double);
+	*p50_ms = sorted[n / 2] * 1000.0;
+	*p99_ms = sorted[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1] * 1000.0;
+	*max_ms = sorted[n - 1] * 1000.0;
+	return TRUE;
+}
+
+int KMS_VIDEO_FrameTimes(double *emu_ms, double *wait_ms)
+{
+	double e = 0, w = 0;
+	int i;
+	for (i = 0; i < fr_n; i++) {
+		e += fr_emu[i];
+		w += fr_wait[i];
+	}
+	*emu_ms = fr_n ? e * 1000.0 / fr_n : 0;
+	*wait_ms = fr_n ? w * 1000.0 / fr_n : 0;
+	return fr_n > 0;
 }
 
 void KMS_VIDEO_DisplayScreen(void)
@@ -1375,6 +1567,8 @@ void KMS_VIDEO_DisplayScreen(void)
 			flip_pending = 1;
 			front = back;
 			st_flips++;
+			flip_input_ts = frame_input_ts;
+			frame_input_ts = 0;
 			return;
 		}
 		if (errno == EBUSY) {
@@ -1387,6 +1581,8 @@ void KMS_VIDEO_DisplayScreen(void)
 					flip_pending = 1;
 					front = back;
 					st_flips++;
+					flip_input_ts = frame_input_ts;
+					frame_input_ts = 0;
 					return;
 				}
 				flip_pending = 0;
@@ -1399,4 +1595,9 @@ void KMS_VIDEO_DisplayScreen(void)
 	}
 	drmModeSetCrtc(drm_fd, crtc_id, fbs[back].fb_id, 0, 0, &conn_id, 1, &mode);
 	front = back;
+	if (frame_input_ts > 0) { /* no flip event: the picture is up now */
+		flip_input_ts = frame_input_ts;
+		frame_input_ts = 0;
+		lat_sample(clock_now());
+	}
 }

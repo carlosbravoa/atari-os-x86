@@ -35,6 +35,7 @@ static unsigned int frame_bytes = 0;
 static snd_pcm_uframes_t period_frames = 0;
 static snd_pcm_uframes_t buffer_frames = 0;
 static int can_pause = 0;
+static unsigned int underruns = 0;
 
 /* Card selection: laptops often have the HDMI codec as card 0 and the
    analogue one (speakers, headphones) as card 1, so "default" would be
@@ -124,7 +125,13 @@ static int open_pcm(Sound_setup_t *setup)
 	if ((err = snd_pcm_hw_params_set_rate_near(pcm, hw, &rate, NULL)) < 0)
 		goto fail;
 
-	period_frames = setup->buffer_frames ? setup->buffer_frames : rate / 50;
+	/* Low latency (F8 > Controls): 10 ms periods, 4 of them (40 ms; with
+	   3 QEMU's HDA underran ~20 times a second when the timer paces the
+	   emulation); otherwise the core's 20 ms periods, 4 of them (80 ms). */
+	if (KMS_SYSMENU_low_latency)
+		period_frames = rate / 100;
+	else
+		period_frames = setup->buffer_frames ? setup->buffer_frames : rate / 50;
 	if ((err = snd_pcm_hw_params_set_period_size_near(pcm, hw, &period_frames, NULL)) < 0)
 		goto fail;
 	buffer_frames = period_frames * 4;
@@ -150,9 +157,10 @@ static int open_pcm(Sound_setup_t *setup)
 	frame_bytes = setup->channels * setup->sample_size;
 
 	(void)i;
-	Log_print("alsa: %s, %u Hz, %u ch, %u-bit, period %lu, buffer %lu frames",
+	Log_print("alsa: %s, %u Hz, %u ch, %u-bit, period %lu, buffer %lu frames (%.0f ms%s)",
 	          pcm_name, rate, channels, setup->sample_size * 8,
-	          (unsigned long)period_frames, (unsigned long)buffer_frames);
+	          (unsigned long)period_frames, (unsigned long)buffer_frames,
+	          buffer_frames * 1000.0 / rate, KMS_SYSMENU_low_latency ? ", low latency" : "");
 	return TRUE;
 
 fail:
@@ -310,8 +318,15 @@ void PLATFORM_SoundContinue(void)
 		snd_pcm_prepare(pcm);
 }
 
+unsigned int ALSA_Underruns(void)
+{
+	return underruns;
+}
+
 static int recover(int err)
 {
+	if (err == -EPIPE)
+		underruns++;
 	if (err == -EPIPE || err == -ESTRPIPE) {
 		if (snd_pcm_recover(pcm, err, 1) == 0)
 			return TRUE;

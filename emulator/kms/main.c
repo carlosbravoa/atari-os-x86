@@ -138,6 +138,8 @@ int main(int argc, char **argv)
 		return 3;
 
 	for (;;) {
+		double t0, input_t;
+		int menu_ran = FALSE;
 #ifdef SOUND
 		/* The sound card may appear after we started (SOF firmware, USB
 		   audio): keep trying for a while instead of staying silent. */
@@ -155,9 +157,19 @@ int main(int argc, char **argv)
 			}
 		}
 #endif
+		KMS_SYSMENU_LatencyPoll();
+		/* Low latency: the previous frame's flip lands first, then the
+		   input is read and this frame emulated and queued at once, so it
+		   is shown one vblank later (otherwise the frame sleep inside
+		   Atari800_Frame waits, with the input already read). */
+		t0 = Util_time();
+		if (KMS_SYSMENU_low_latency)
+			KMS_VIDEO_WaitFrame();
 		INPUT_key_code = PLATFORM_Keyboard();
+		input_t = KMS_INPUT_TakeEventTime();
 		if (KMS_SYSMENU_requested) {
 			KMS_SYSMENU_requested = FALSE;
+			menu_ran = TRUE;
 #ifdef SOUND
 			Sound_Pause();
 #endif
@@ -170,6 +182,7 @@ int main(int argc, char **argv)
 		}
 		if (KMS_HELP_requested) {
 			KMS_HELP_requested = FALSE;
+			menu_ran = TRUE;
 #ifdef SOUND
 			Sound_Pause();
 #endif
@@ -184,6 +197,7 @@ int main(int argc, char **argv)
 		KMS_HDEV_Poll();
 		if (KMS_LIBRARY_requested) {
 			KMS_LIBRARY_requested = FALSE;
+			menu_ran = TRUE;
 #ifdef SOUND
 			Sound_Pause();
 #endif
@@ -194,8 +208,13 @@ int main(int argc, char **argv)
 			KMS_INPUT_close_menus = FALSE;
 			INPUT_key_code = AKEY_NONE;
 		}
+		if (menu_ran)
+			KMS_INPUT_TakeEventTime(); /* a menu was open: its input and time are not the game's */
+		else
+			KMS_VIDEO_FrameInput(input_t);
 		Atari800_Frame();
 		if (Atari800_display_screen)
 			PLATFORM_DisplayScreen();
+		KMS_VIDEO_FrameDone(Util_time() - t0, !menu_ran);
 	}
 }

@@ -101,4 +101,29 @@ int KMS_VIDEO_PacingLocked(void);
    only chosen when the emulator starts). */
 int KMS_VIDEO_HasModeFor(double fps);
 
+/* Input lag, controller to display (kms/main.c drives it, once a frame):
+   - WaitFrame (Low latency only): wait for the previous frame's flip now,
+     before the input is read; TakeFramePaced is TRUE once after that (the
+     frame sleep in atari800's Atari800_Sync has nothing left to wait for).
+   - FrameInput(t): the kernel stamp of the oldest input this frame used
+     (KMS_INPUT_TakeEventTime); the sample is the flip's vblank stamp minus
+     it, taken when that frame's flip completes (not called when a menu
+     was open).
+   - FrameDone(total, valid): one turn of the main loop took TOTAL
+     seconds; the time spent in it sleeping or waiting for flips is split
+     off (the rest is emulate + blit). VALID FALSE: a menu ran, no sample.
+   Latency: average and maximum over the last 120 samples (ms), FALSE
+   while there is none. FrameTimes: emulate+blit and wait, average ms
+   over the last 120 frames. */
+void KMS_VIDEO_WaitFrame(void);
+int KMS_VIDEO_TakeFramePaced(void);
+void KMS_VIDEO_FrameInput(double t);
+void KMS_VIDEO_FrameDone(double total, int valid);
+int KMS_VIDEO_Latency(double *avg_ms, double *max_ms, int *n);
+int KMS_VIDEO_FrameTimes(double *emu_ms, double *wait_ms);
+/* Scheduling jitter: p50, p99 and maximum (ms) over the last 600 wake-ups,
+   each how late a timed sleep returned, or how long after a flip's vblank
+   the loop waiting for it ran again. FALSE while there is none. */
+int KMS_VIDEO_Wake(double *p50_ms, double *p99_ms, double *max_ms);
+
 #endif /* KMS_KMS_KMS_VIDEO_H_ */

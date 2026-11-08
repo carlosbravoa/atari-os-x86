@@ -1614,6 +1614,45 @@ static void power_defaults(void)
 	       aspm ? "powersave" : "unchanged", sata, usb, usb_kept, epp, gpu);
 }
 
+/* CPU mode for the emulator's F8 > Controls "Low latency" switch, sent
+   as "power fast|quiet" when it starts and on every change, kept for the
+   session. Fast: energy_performance_preference=performance, or the
+   performance governor on a CPU without EPP (its governor is put back for
+   quiet). Quiet is power_defaults()' balance_power. */
+static int power_fast = 0;
+static char power_saved_gov[32] = "";
+
+static void power_mode(int fast)
+{
+	glob_t g;
+	size_t i;
+	int epp = 0, gov = 0;
+	char path[300];
+
+	if (glob("/sys/devices/system/cpu/cpufreq/policy*", 0, NULL, &g) == 0) {
+		for (i = 0; i < g.gl_pathc; i++) {
+			snprintf(path, sizeof path, "%s/energy_performance_preference", g.gl_pathv[i]);
+			if (exists(path)) {
+				epp += write_sysfs(path, fast ? "performance" : "balance_power");
+				continue;
+			}
+			snprintf(path, sizeof path, "%s/scaling_governor", g.gl_pathv[i]);
+			if (fast) {
+				if (!power_saved_gov[0])
+					read_file(path, power_saved_gov, sizeof power_saved_gov);
+				gov += write_sysfs(path, "performance");
+			}
+			else if (power_saved_gov[0])
+				gov += write_sysfs(path, power_saved_gov);
+		}
+		globfree(&g);
+	}
+	power_fast = fast;
+	logmsg("power: %s, epp %s %d policies, governor %s %d", fast ? "fast" : "quiet",
+	       fast ? "performance" : "balance_power", epp,
+	       fast ? "performance" : power_saved_gov[0] ? power_saved_gov : "unchanged", gov);
+}
+
 /* ---- networking ---------------------------------------------------------- */
 
 /* ---- wpa_supplicant events ----------------------------------------------- */
@@ -3032,7 +3071,7 @@ static void cmd_status(int fd)
 		snprintf(line, sizeof line, "image %s %s\n", image_dev, image_path);
 		reply(fd, line);
 	}
-	snprintf(line, sizeof line, "version %s\n", os_version);
+	snprintf(line, sizeof line, "version %s\npower %s\n", os_version, power_fast ? "fast" : "quiet");
 	reply(fd, line);
 	{
 		/* perf <emu%> <fuji%> <tempC> <watts>; sampled at most once a second */
@@ -3308,6 +3347,10 @@ static void ctl_handle(int fd)
 	}
 	else if (strcmp(line, "perf") == 0 || strcmp(line, "perf on") == 0) {
 		perf_start();
+		reply(fd, "OK\n");
+	}
+	else if (strcmp(line, "power fast") == 0 || strcmp(line, "power quiet") == 0) {
+		power_mode(line[6] == 'f');
 		reply(fd, "OK\n");
 	}
 	else if (strcmp(line, "perf off") == 0) {

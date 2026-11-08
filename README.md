@@ -258,7 +258,8 @@ Eject all, back to BASIC
 Display...      Scaling, Smoothing, Scanlines, Borders, TV look,
                 TV system, Brightness
 Sound: 80%
-Controls...     Arrows, Keyboard type, Gamepad 1 drives, Gamepad buttons
+Controls...     Arrows, Keyboard type, Low latency, Gamepad 1 drives,
+                Gamepad buttons
 Network: <ssid>  Wi-Fi, IP, Remote access (SSH), SSH password
 Help: keys and menus
 Hardware status
@@ -322,9 +323,11 @@ with it too, and the Hardware page shows it as "Version".
   says) or Atari (positional: the PC key in the place of an Atari key
   types that key, so Shift+2 is `"`, Shift+8 `@`, `-` is `<`, `=` `>`,
   `[` `-`, `]` `=`, `'` `+`, `\` `*`; the Help page shows the table);
+  **Low latency** on (default) or off (see "Input lag" below);
   **Gamepad 1 drives** joystick 0 or 1 (swaps the first two gamepads;
   menus follow the first); **Gamepad buttons** (the mapping). Live and
-  saved (`KMS_ARROWS_JOYSTICK`, `KMS_KEYBOARD=pc|atari`, `KMS_PAD_SWAP`)
+  saved (`KMS_ARROWS_JOYSTICK`, `KMS_KEYBOARD=pc|atari`,
+  `KMS_LOW_LATENCY`, `KMS_PAD_SWAP`)
 - **Network...**: **Wi-Fi** (scan, pick a network, type the password;
   `wpa_supplicant` keeps the network in
   `atari/config/wpa_supplicant.conf`), the IP address, **Remote access
@@ -342,10 +345,11 @@ with it too, and the Hardware page shows it as "Version".
   one), so a panel with a 50 Hz mode picks it up for PAL after "Restart
   emulator".
 - **Hardware status** page: machine, CPU, RAM, CPU use (emulator,
-  FujiNet), temperature and package power, video driver and mode, display
-  options, TV system and pacing, sound card, Wi-Fi, IP, battery, boot
-  medium, boot target, what the last cold start booted (and whether BASIC
-  was on), kernel
+  FujiNet), temperature and package power and the CPU mode (`fast` /
+  `quiet`, from Low latency), input lag, frame and wake-up times (see
+  "Input lag"), video driver and mode, display options, TV system and
+  pacing, sound card, Wi-Fi, IP, battery, boot medium, boot target, what
+  the last cold start booted (and whether BASIC was on), kernel
 - **Report a problem...**: asks for a one-line description and writes
   `atari/logs/report-<MMDD-HHMMSS>.txt` on the stick (version, machine, settings,
   what is mounted, the recent emulator and FujiNet logs), with dmesg and
@@ -376,6 +380,56 @@ bytes)` or `failed`) and on the Hardware status page (`Stick: FAT clean`
 / `FAT repaired at boot`); the stick is mounted either way. FAT USB drives
 are checked the same way when they are plugged in (60 s at most; exFAT
 and NTFS have no checker here).
+
+### Input lag
+
+The time from a key or gamepad press to the picture that shows it is
+measured all the time: every evdev event carries the kernel's time stamp
+and every page flip the time of the vblank it landed on (both
+`CLOCK_MONOTONIC`), so each frame that used new input gives one sample,
+flip minus the oldest event it used. The Hardware status page shows
+
+```
+Input lag: 31 ms avg, 44 max (120)
+Frame: 1.9 ms emu, 13 ms wait
+Wake: 0.05 ms p50, 0.30 p99, 1.2 max
+```
+
+the average and worst of the last 120 samples (`no input yet` before the
+first), the time per frame spent emulating and drawing versus waiting,
+and how late the emulator wakes up after a sleep or after the vblank it
+waits for (median, 99th percentile and worst of the last 600: tens of
+microseconds mean a real-time kernel would buy nothing). With `-kms-debug`
+(the debug boot entry) the log gets the same every 5 s, plus the sound
+card's underruns. What is not in the number: the USB polling before the
+kernel sees the event (1 ms now, see below) and the panel's own scan-out
+and response time.
+
+**Low latency** (F8 > Controls, on by default, `KMS_LOW_LATENCY`):
+
+- each frame waits for the previous frame's vblank first, then reads the
+  input, emulates and queues its flip, so it is on screen one vblank later
+  (otherwise the input is read, the frame emulated, then it waits: one
+  frame older). Only when the display paces the emulation (a 60 Hz panel
+  with NTSC, see TV system)
+- the sound card runs 10 ms periods, four of them (40 ms) instead of
+  20 ms x 4 (80 ms): sound follows the picture closer (30 ms underran in
+  QEMU)
+- the emulator's main thread runs `SCHED_FIFO` (priority 10, not in turbo)
+  with its memory locked and 50 us timer slack, so a busy system does not
+  make it late (the log says `sched: fifo 10, timerslack 50us, mlockall
+  ok`, or why not)
+- init sets the CPU to `energy_performance_preference=performance` (the
+  `performance` governor where there is no EPP); off, it goes back to
+  `balance_power`. The CPU line of the Hardware page ends in `fast` or
+  `quiet`. The fan may be heard more with it on: switch it off for a quiet
+  machine.
+
+Kernel options for it (always on): `usbhid.jspoll=1 usbhid.kbpoll=1
+usbhid.mousepoll=1` poll USB keyboards and gamepads every 1 ms instead of
+their 8-10 ms, and `i915.enable_psr=0` turns Intel's panel self refresh
+off (waking the panel from it delays every change of the picture; it
+costs a little battery).
 
 ### Help (F1)
 
