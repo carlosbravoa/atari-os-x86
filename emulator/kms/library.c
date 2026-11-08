@@ -1183,13 +1183,13 @@ static int action_popup(const char *run, const char *ref, const char *copy, cons
 	menu_reset();
 	menu_add(-1, NULL, title, NULL);
 	if (there) {
-		menu_add(ACT_RUN, NULL, "Run", NULL);
+		menu_add(ACT_RUN, NULL, "Run (restarts, BASIC off)", NULL);
 		if (kind == FK_DISK && is_disk_image(run))
-			menu_add(ACT_RUN_BASIC, NULL, "Run with BASIC", NULL);
+			menu_add(ACT_RUN_BASIC, NULL, "Run with BASIC (restarts)", NULL);
 		if (kind == FK_DISK) {
-			char item[16];
+			char item[32];
 			for (i = 1; i <= 4; i++) {
-				snprintf(item, sizeof item, "Mount as D%d:", i);
+				snprintf(item, sizeof item, i == 1 ? "Mount as D%d: (no restart)" : "Mount as D%d:", i);
 				menu_add(ACT_MOUNT_D + i, NULL, item, NULL);
 			}
 		}
