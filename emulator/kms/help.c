@@ -1,15 +1,15 @@
 /*
- * kms/help.c - the F1 Help page: every key, the menus, the gamepad
+ * kms/help.c - the F1 Help: every key, one per line, in a scrolling list
  *
  * Part of atari-os-x86: Atari800 running directly on Linux DRM/KMS,
  * ALSA and evdev with no display server or SDL in between.
  *
- * Info screens of atari800's UI driver, like the System menu's
- * "Hardware status". The driver centres every line and shows at most 20,
- * so the lines of a page are padded to the same width (one left-aligned
- * block) and longer texts are split into pages. Any key turns the page,
- * Esc closes. The positional table of the Atari keyboard type comes from
- * kms/input.c, so the page shows what the keys do.
+ * Drawn with atari800's UI driver like the F8 and F9 menus: a list whose
+ * lines are keys (section titles are labels the cursor skips), so the
+ * arrow keys (and Page Up/Down, or a gamepad) scroll through it, Esc or
+ * F1 closes it. The positional table of the Atari keyboard type comes
+ * from kms/input.c, so the page shows what the keys really do. The
+ * gamepad page (F8 > Controls) is a plain info screen.
  *
  * This file is part of the Atari800 emulator project which emulates
  * the Atari 400, 800, 800XL, 130XE, and 5200 8-bit computers.
@@ -35,42 +35,65 @@
 #include "kms/kms_input.h"
 #include "kms/kms_sysmenu.h"
 
-#define PAGE_LINES 20 /* rows 2..21 of the info screen; the prompt is on 22 */
+#define MAX_LINES 96 /* the UI driver's Select holds 100 items */
 #define LINE_MAX_W 38
 
 int KMS_HELP_requested = FALSE;
 
-/* The Atari font has no backtick (it is a diamond there), so the Atari
-   key is named by its place. Every line is at most 38 columns. */
-static const char *const keys_page[] = {
-	"F1  this page      F8  System menu",
-	"F9  Library        Esc back / close",
-	"F2  OPTION   F3  SELECT   F4  START",
-	"F5  reset    Shift+F5  power-cycle",
-	"F6  HELP     F7  BREAK   F12 turbo",
-	"F10 screenshot (Shift: interlaced)",
-	"F11 arrows = cursor keys / joystick",
-	"Win / key left of 1  Atari (inverse)",
-	"Home CLEAR  Ins/Del insert/delete",
-	"Caps Lock  CAPS       Tab  TAB",
-	"Arrows, Shift+arrows  cursor keys",
-	"Arrows + left Alt  joystick after F11",
-	"Numpad 8 2 4 6 move, 0 fire (always)",
-	"",
-	NULL, /* keyboard type, filled in */
-	NULL,
-	"Gamepad: stick/D-pad move, A fire,",
-	"  Start/Select/X START/SELECT/OPTION,",
-	"  B back, Guide = System menu"
-};
-
-static const char *const menus_page[] = {
-	"Library (F9): Tab next source,",
-	"  RETURN open/run, Backspace up,",
-	"  Esc close, Filter narrows names",
-	"Menus: arrows, RETURN, Esc back",
-	"Power off: F8 > Shut down, or the",
-	"  power button. Never just unplug."
+/* Lines of the list; a line starting with '#' is a section title (a
+   label). The keyboard type block is inserted where "@KEYBOARD" is.
+   Every line is at most 38 columns. The Atari font has no backtick (it
+   is a diamond there), so the Atari key is named by its place. */
+static const char *const help_lines[] = {
+	"#Function keys",
+	"F1   Help (this list; F1 closes it)",
+	"F2   OPTION",
+	"F3   SELECT",
+	"F4   START",
+	"F5   Reset (warm)",
+	"Shift+F5   Power-cycle (cold reset)",
+	"F6   HELP key",
+	"F7   BREAK key",
+	"F8   System menu (F8 closes it)",
+	"F9   Library (F9 closes it)",
+	"F10  Screenshot (Shift: interlaced)",
+	"F11  Arrows: cursor keys / joystick",
+	"F12  Turbo (full speed) on/off",
+	"#Atari keys on the PC keyboard",
+	"Win, or the key left of 1   Atari",
+	"           (inverse video)",
+	"Home        CLEAR",
+	"Ins / Del   Insert / delete character",
+	"Shift+Ins / Del   Insert/delete line",
+	"Caps Lock   CAPS",
+	"Tab         TAB",
+	"Arrows      Cursor (with Shift too)",
+	"Ctrl+key    Ctrl+key (graphics)",
+	"@KEYBOARD",
+	"#Joystick on the keyboard",
+	"Numpad 8 2 4 6   Move",
+	"Numpad 0         Fire",
+	"Arrows + left Alt   after F11",
+	"#Gamepad",
+	"Stick, D-pad     Joystick",
+	"A, triggers      Fire",
+	"Start / Select   START / SELECT",
+	"X, Y             OPTION",
+	"B                Back (Esc) in menus",
+	"Guide            System menu",
+	"F8 > Controls: swap gamepads 1 and 2",
+	"#Library (F9)",
+	"Tab         Next source (USB drives)",
+	"RETURN      Open folder, run file",
+	"Backspace   Up one folder",
+	"Esc         Close",
+	"Drives line: what is mounted; eject",
+	"#Menus",
+	"Arrows move, RETURN picks, Esc back",
+	"#Power off",
+	"F8 > Shut down, or the power button.",
+	"Never just unplug the laptop.",
+	NULL
 };
 
 static const char *const gamepad_page[] = {
@@ -89,88 +112,111 @@ static const char *const gamepad_page[] = {
 	"  always follow gamepad 1."
 };
 
-/* One info screen of N lines (at most PAGE_LINES), padded to the widest
-   so the centred block reads left-aligned. FALSE when Esc closed it. */
-static int show_page(const char *title, const char *const *lines, int n)
+static UI_tMenuItem items[MAX_LINES + 1];
+static char rows[24][LINE_MAX_W + 1]; /* the keyboard type block */
+static int n_items;
+
+static void add_line(const char *text)
 {
-	static char page[PAGE_LINES * (LINE_MAX_W + 1) + 2];
+	UI_tMenuItem *m;
+	if (n_items >= MAX_LINES)
+		return;
+	m = &items[n_items];
+	m->flags = UI_ITEM_ACTION;
+	m->retval = text[0] == '#' ? -1 : n_items; /* -1: a label, skipped */
+	m->prefix = NULL;
+	m->item = (char *)(text[0] == '#' ? text + 1 : text);
+	m->suffix = NULL;
+	n_items++;
+}
+
+static void add_keyboard_block(void)
+{
+	int n = 0;
+	if (KMS_INPUT_keyboard_pc) {
+		add_line("#Keyboard type: PC  (F8 > Controls)");
+		add_line("Every key types what its cap says.");
+		add_line("Braces and tilde have no Atari key.");
+		return;
+	}
+	add_line("#Keyboard type: Atari (F8 > Controls)");
+	add_line("The PC key types the Atari key in");
+	add_line("its place:  PC key   plain   Shift");
+	for (;;) {
+		const char *pc, *plain, *shifted;
+		if (n >= (int)(sizeof rows / sizeof rows[0]) || !KMS_INPUT_PositionalKey(n, &pc, &plain, &shifted))
+			break;
+		snprintf(rows[n], sizeof rows[n], "            %-8s %-7s %s", pc, plain, shifted);
+		add_line(rows[n]);
+		n++;
+	}
+}
+
+static void build(void)
+{
+	size_t i;
+	n_items = 0;
+	for (i = 0; help_lines[i] != NULL; i++) {
+		if (strcmp(help_lines[i], "@KEYBOARD") == 0)
+			add_keyboard_block();
+		else
+			add_line(help_lines[i]);
+	}
+	items[n_items].flags = UI_ITEM_END;
+	items[n_items].retval = 0;
+	items[n_items].prefix = NULL;
+	items[n_items].item = NULL;
+	items[n_items].suffix = NULL;
+}
+
+/* One info screen of N lines (at most 20), padded to the widest so the
+   centred block reads left-aligned. */
+static void show_page(const char *title, const char *const *lines, int n)
+{
+	static char page[20 * (LINE_MAX_W + 1) + 2];
 	size_t pos = 0;
 	int i, width = 0;
 
-	if (n > PAGE_LINES)
-		n = PAGE_LINES;
+	if (n > 20)
+		n = 20;
 	for (i = 0; i < n; i++) {
-		int len = lines[i] ? (int)strlen(lines[i]) : 0;
+		int len = (int)strlen(lines[i]);
 		if (len > width)
 			width = len;
 	}
 	if (width > LINE_MAX_W)
 		width = LINE_MAX_W;
 	for (i = 0; i < n; i++) {
-		snprintf(page + pos, LINE_MAX_W + 1, "%-*.*s", width, LINE_MAX_W, lines[i] ? lines[i] : "");
+		snprintf(page + pos, LINE_MAX_W + 1, "%-*.*s", width, LINE_MAX_W, lines[i]);
 		pos += (size_t)width + 1; /* keeps the '\0' snprintf wrote */
 	}
 	page[pos++] = '\n';
 	page[pos] = '\0';
 	UI_driver->fInfoScreen(title, page);
-	return KMS_INPUT_LastKey() != AKEY_ESCAPE && UI_alt_function < 0;
-}
-
-/* The positional table, two keys per line. */
-static int show_positional(const char *title)
-{
-	static char rows[PAGE_LINES][LINE_MAX_W + 1];
-	const char *lines[PAGE_LINES];
-	const char *pc, *plain, *shifted;
-	int n = 0, i = 0;
-
-	lines[n++] = "Keyboard type Atari: a PC key types";
-	lines[n++] = "the Atari key in its place.";
-	lines[n++] = "";
-	lines[n++] = "PC Atari Shift     PC Atari Shift";
-	while (n < PAGE_LINES && KMS_INPUT_PositionalKey(i, &pc, &plain, &shifted)) {
-		const char *pc2 = "", *plain2 = "", *shifted2 = "";
-		KMS_INPUT_PositionalKey(i + 1, &pc2, &plain2, &shifted2);
-		snprintf(rows[n], sizeof rows[n], "%-3s%-6s%-9s %-3s%-6s%s", pc, plain, shifted, pc2, plain2, shifted2);
-		lines[n] = rows[n];
-		n++;
-		i += 2;
-	}
-	if (n < PAGE_LINES)
-		lines[n++] = "";
-	if (n < PAGE_LINES)
-		lines[n++] = "Arrows move the cursor, as in PC.";
-	return show_page(title, lines, n);
 }
 
 void KMS_HELP_Run(void)
 {
-	const char *keys[sizeof keys_page / sizeof keys_page[0]];
 	int was_active = UI_is_active;
-	int atari = !KMS_INPUT_keyboard_pc;
-	int pages = atari ? 3 : 2;
-	char title[16];
-	size_t i;
+	int owner = KMS_INPUT_menu_owner;
+	int sel = 1;
 
 	if (!was_active) {
 		UI_is_active = TRUE;
 		UI_driver->fInit();
 	}
 	KMS_SYSMENU_HintSeen();
+	KMS_INPUT_menu_owner = 1;
 	Log_print("help: open");
 
-	for (i = 0; i < sizeof keys_page / sizeof keys_page[0]; i++)
-		keys[i] = keys_page[i];
-	for (i = 0; keys[i] != NULL; i++)
-		;
-	keys[i] = atari ? "Keyboard type: Atari (positional)" : "Keyboard type: PC   (F8 > Controls)";
-	keys[i + 1] = atari ? "  Atari layout, page 3 (F8 > Controls)" : "  keys type what their caps say";
-
-	snprintf(title, sizeof title, "Keys (1/%d)", pages);
-	if (show_page(title, keys, (int)(sizeof keys / sizeof keys[0]))) {
-		snprintf(title, sizeof title, "Menus (2/%d)", pages);
-		if (show_page(title, menus_page, (int)(sizeof menus_page / sizeof menus_page[0])) && atari)
-			show_positional("Atari keyboard (3/3)");
+	build();
+	/* RETURN on a line does nothing; arrows scroll; Esc (or F1, which
+	   the input layer turns into Esc) closes */
+	for (;;) {
+		int r = UI_driver->fSelect("Keys  (arrows scroll, Esc closes)", 0, sel, items, NULL);
+		if (r < 0 || UI_alt_function >= 0 || KMS_INPUT_close_menus)
+			break;
+		sel = r;
 	}
 
 	if (!was_active) {
@@ -181,7 +227,9 @@ void KMS_HELP_Run(void)
 			Atari800_Sync();
 		UI_alt_function = -1;
 	}
-	KMS_HELP_requested = FALSE;
+	KMS_INPUT_menu_owner = owner;
+	if (!KMS_INPUT_close_menus)
+		KMS_HELP_requested = FALSE; /* a toggle may have asked for another menu */
 }
 
 void KMS_HELP_GamepadPage(void)

@@ -20,13 +20,16 @@ extern int KMS_INPUT_keyboard_pc;
    menus still follow gamepad 1. */
 extern int KMS_INPUT_pad_swap;
 
+/* The F-key (1, 8, 9) whose menu is open, 0 outside menus; each Run sets
+   it and restores the previous. KMS_INPUT_close_menus is raised when one
+   of the three keys is pressed inside a menu: the menu loops exit all
+   their levels; main.c clears it after the menu returns. */
+extern int KMS_INPUT_menu_owner;
+extern int KMS_INPUT_close_menus;
+
 /* Row I of the positional (Atari keyboard type) table: the PC key and
    what it types plain and with Shift. FALSE past the end. */
 int KMS_INPUT_PositionalKey(int i, const char **pc, const char **plain, const char **shifted);
-
-/* The last key code KMS_INPUT_Keyboard returned other than AKEY_NONE
-   (tells which key closed an info page). */
-int KMS_INPUT_LastKey(void);
 
 int KMS_INPUT_Initialise(int *argc, char *argv[]);
 void KMS_INPUT_Exit(void);

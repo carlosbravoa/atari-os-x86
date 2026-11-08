@@ -165,6 +165,7 @@ int main(int argc, char **argv)
 #ifdef SOUND
 			Sound_Continue();
 #endif
+			KMS_INPUT_close_menus = FALSE;
 			INPUT_key_code = AKEY_NONE;
 		}
 		if (KMS_HELP_requested) {
@@ -176,6 +177,7 @@ int main(int argc, char **argv)
 #ifdef SOUND
 			Sound_Continue();
 #endif
+			KMS_INPUT_close_menus = FALSE;
 			INPUT_key_code = AKEY_NONE;
 		}
 		KMS_LIBRARY_Poll();
@@ -189,6 +191,7 @@ int main(int argc, char **argv)
 #ifdef SOUND
 			Sound_Continue();
 #endif
+			KMS_INPUT_close_menus = FALSE;
 			INPUT_key_code = AKEY_NONE;
 		}
 		Atari800_Frame();

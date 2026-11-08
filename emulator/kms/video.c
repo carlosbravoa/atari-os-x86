@@ -936,9 +936,12 @@ void KMS_VIDEO_PaletteUpdate(void)
 
 void KMS_VIDEO_SetHint(const char *text, double seconds)
 {
+	/* a hint that is taken down (text "") must be wiped from both
+	   buffers: the band is cleared for a few frames as when it expires */
+	int showing = hint_text[0] && Util_time() < hint_until;
 	Util_strlcpy(hint_text, text, sizeof hint_text);
 	hint_until = Util_time() + seconds;
-	hint_clear_frames = 0;
+	hint_clear_frames = showing ? 3 : 0;
 }
 
 /* Text in the black border below (or above) the picture, Atari font at

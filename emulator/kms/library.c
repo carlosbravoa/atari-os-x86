@@ -49,6 +49,7 @@
 #include "util.h"
 #include "kms/kms_boot.h"
 #include "kms/kms_library.h"
+#include "kms/kms_input.h"
 #include "kms/kms_sysmenu.h"
 #include "kms/kms_video.h"
 #include "kms/kms_zipfile.h"
@@ -1417,10 +1418,12 @@ int KMS_LIBRARY_Run(void)
 	char want[256], title[80], line[48];
 	int page = 0, sel = -1, ran = FALSE;
 	int src;
+	int owner = KMS_INPUT_menu_owner;
 
 	UI_is_active = TRUE;
 	UI_driver->fInit();
 	KMS_SYSMENU_HintSeen();
+	KMS_INPUT_menu_owner = 9;
 	if (usb_hint_until > Util_time()) {
 		KMS_VIDEO_SetHint("", 0); /* they found the key */
 		usb_hint_until = 0;
@@ -1434,7 +1437,8 @@ int KMS_LIBRARY_Run(void)
 	want[0] = '\0';
 	Log_print("library: open (%d sources)", n_sources);
 
-	while (!ran) {
+	/* F9 (or F1/F8) pressed inside closes every level: KMS_INPUT_close_menus */
+	while (!ran && !KMS_INPUT_close_menus) {
 		int r, seltype = 0, i, first, at_lib_root;
 
 		build_sources();
@@ -1599,7 +1603,9 @@ int KMS_LIBRARY_Run(void)
 			Atari800_Sync();
 	}
 	UI_alt_function = -1;
-	KMS_LIBRARY_requested = FALSE;
+	KMS_INPUT_menu_owner = owner;
+	if (!KMS_INPUT_close_menus)
+		KMS_LIBRARY_requested = FALSE; /* a toggle may have asked for another menu */
 	return ran;
 }
 

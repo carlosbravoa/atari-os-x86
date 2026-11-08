@@ -335,11 +335,11 @@ one of the three is opened.
 
 ### Help (F1)
 
-F1 shows every key on one page (any key turns to the next, Esc closes):
-the function keys, the Atari keys on the PC keyboard, the joystick keys,
-the current keyboard type, the gamepad; a second page has the Library and
-menu keys and how to power off; with the Atari keyboard type a third page
-has the positional table. The same pages are F8 > "Help: keys and menus".
+F1 shows every key, one per line, in a list the arrow keys scroll (Esc
+or F1 closes): the function keys F1 to F12 in order, the Atari keys on
+the PC keyboard, the current keyboard type (with the positional table
+when it is Atari), the joystick keys, the gamepad, the Library and menu
+keys and how to power off. The same list is F8 > "Help: keys and menus".
 
 ### Remote access
 
@@ -423,7 +423,7 @@ restarting itself.
 
 | Key | Atari |
 |---|---|
-| F1 | Help: every key (the stock atari800 menu is F8 > Advanced) |
+| F1 | Help: every key (the stock atari800 menu is F8 > Advanced). F1, F8 and F9 toggle: pressed inside a menu they close it, pressed inside another of the three they switch to theirs |
 | F2 / F3 / F4 | OPTION / SELECT / START |
 | F5, Shift+F5 | warm / cold reset |
 | F6, F7 | HELP, BREAK |

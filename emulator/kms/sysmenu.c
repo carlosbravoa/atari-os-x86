@@ -1177,12 +1177,15 @@ void KMS_SYSMENU_Run(void)
 	static char boot_item[48], eject_item[48], vol_item[32], net_item[48], reboot_item[48];
 	int option = 1;
 	int done = FALSE;
+	int owner = KMS_INPUT_menu_owner;
 
 	UI_is_active = TRUE;
 	UI_driver->fInit();
 	KMS_SYSMENU_HintSeen();
+	KMS_INPUT_menu_owner = 8;
 
-	while (!done) {
+	/* F8 (or F1/F9) pressed inside closes every level: KMS_INPUT_close_menus */
+	while (!done && !KMS_INPUT_close_menus) {
 		char status[1024], buf[128], reply[1024];
 		int have_ctl, vol;
 		UI_tMenuItem menu[] = {
@@ -1346,6 +1349,7 @@ void KMS_SYSMENU_Run(void)
 			Atari800_Sync();
 	}
 	UI_alt_function = -1;
-	KMS_SYSMENU_requested = FALSE;
-	KMS_HELP_requested = FALSE;
+	KMS_INPUT_menu_owner = owner;
+	if (!KMS_INPUT_close_menus)
+		KMS_SYSMENU_requested = FALSE; /* a toggle may have asked for another menu */
 }

@@ -61,7 +61,8 @@
 int KMS_INPUT_arrows_joystick = FALSE; /* F11 toggles; FujiNet CONFIG and BASIC need cursor keys */
 int KMS_INPUT_keyboard_pc = TRUE;      /* FALSE: Atari (positional) keyboard type */
 int KMS_INPUT_pad_swap = FALSE;        /* gamepad 1 drives joystick 1 and gamepad 2 joystick 0 */
-static int last_code = AKEY_NONE;      /* last key code returned, for KMS_INPUT_LastKey() */
+int KMS_INPUT_menu_owner = 0;          /* 1, 8 or 9: the F-key whose menu is open (0: none) */
+int KMS_INPUT_close_menus = FALSE;     /* F1/F8/F9 inside a menu: close it (see menu_key) */
 static int debug_keys = FALSE; /* -evdev-debug: log every key event */
 
 #define INPUT_DIR "/dev/input"
@@ -648,14 +649,23 @@ int KMS_INPUT_Keyboard(void)
 			key_pressed = 0;
 		}
 	}
-	if (code != AKEY_NONE)
-		last_code = code;
 	return code;
 }
 
-int KMS_INPUT_LastKey(void)
+/* F1, F8 and F9 toggle: outside a menu they open theirs; inside one the
+   open menu closes (all its levels: the Run loops watch
+   KMS_INPUT_close_menus) and, if it was another key, that one's menu
+   opens next. The stock menu under F8 > Advanced only sees the Esc. */
+static int menu_key(int key, int *requested)
 {
-	return last_code;
+	if (!UI_is_active) {
+		*requested = TRUE;
+		return AKEY_NONE;
+	}
+	KMS_INPUT_close_menus = TRUE;
+	if (KMS_INPUT_menu_owner != key)
+		*requested = TRUE;
+	return AKEY_ESCAPE;
 }
 
 static int keyboard_inner(void)
@@ -711,9 +721,7 @@ static int keyboard_inner(void)
 	case KEY_F1:
 		key_pressed = 0;
 		/* the Help page; the stock atari800 menu is F8 > Advanced */
-		if (!UI_is_active)
-			KMS_HELP_requested = TRUE;
-		return AKEY_NONE;
+		return menu_key(1, &KMS_HELP_requested);
 	case KEY_F2: case KEY_F3: case KEY_F4:
 		return AKEY_NONE; /* console keys, handled above */
 	case KEY_F5:
@@ -721,8 +729,7 @@ static int keyboard_inner(void)
 		return shift ? AKEY_COLDSTART : AKEY_WARMSTART;
 	case KEY_F8:
 		key_pressed = 0;
-		KMS_SYSMENU_requested = TRUE;
-		return AKEY_NONE;
+		return menu_key(8, &KMS_SYSMENU_requested);
 	case KEY_F7:
 		if (BINLOAD_wait_active) {
 			BINLOAD_pause_loading = TRUE;
@@ -731,8 +738,7 @@ static int keyboard_inner(void)
 		return AKEY_BREAK;
 	case KEY_F9:
 		key_pressed = 0;
-		KMS_LIBRARY_requested = TRUE; /* never AKEY_EXIT: shutdown is in the menus */
-		return AKEY_NONE;
+		return menu_key(9, &KMS_LIBRARY_requested); /* never AKEY_EXIT: shutdown is in the menus */
 	case KEY_F10:
 		key_pressed = 0;
 		return shift ? AKEY_SCREENSHOT_INTERLACE : AKEY_SCREENSHOT;
