@@ -22,6 +22,7 @@ enum {
 	KMS_SCALE_INTEGER, /* largest integer factor that fits, same on both axes (default) */
 	KMS_SCALE_FIT,     /* fill the height, 4:3 width (Atari pixel shape kept), fractional */
 	KMS_SCALE_STRETCH, /* fill the whole panel ("Fill") */
+	KMS_SCALE_INTEGER_XY, /* the largest whole factor on each axis (5 x 4 on 1920x1080): crisp, scanline-friendly, wider */
 	KMS_SCALE_FREE     /* KMS_VIDEO_free_x by KMS_VIDEO_free_y, clipped to the panel */
 };
 

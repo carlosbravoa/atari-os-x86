@@ -472,7 +472,7 @@ static void pacing_check(void)
 
 /* ---- scaling layout -------------------------------------------------- */
 
-static const char *const scale_names[] = { "integer", "fit", "fill", "free" };
+static const char *const scale_names[] = { "integer", "fit", "fill", "integer-xy", "free" };
 static const char *const scan_names[] = { "off", "light", "medium", "strong" };
 static const char *const border_names[] = { "full", "tv", "tight" };
 
@@ -567,6 +567,20 @@ static void compute_layout(void)
 			dst_h = (int)((double)W * 3 * 336 / (4.0 * sw) + 0.5);
 		}
 		break;
+	case KMS_SCALE_INTEGER_XY: {
+		/* the largest whole factor on each axis: 5 x 4 on a 1920x1080
+		   panel ("a really sweet spot": wide, crisp, scanlines land on
+		   whole rows), 4 x 3 on 1366x768, the same as Integer when the
+		   panel is 4:3-ish */
+		int fx = W / sw, fy = H / sh;
+		if (fx < 1) fx = 1;
+		if (fy < 1) fy = 1;
+		dst_w = sw * fx;
+		dst_h = sh * fy;
+		if (dst_w > W) dst_w = W;
+		if (dst_h > H) dst_h = H;
+		break;
+	}
 	case KMS_SCALE_FREE:
 		/* the user's factors, centred and clipped to the panel */
 		dst_w = (int)(sw * KMS_VIDEO_free_x + 0.5);
@@ -602,7 +616,7 @@ static void compute_layout(void)
 	lay_sh = sh;
 
 	lay_ntsc = ntsc_wanted();
-	smooth = KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER;
+	smooth = KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER_XY;
 #ifdef NTSC_FILTER
 	if (lay_ntsc) {
 		ntsc_w = ATARI_NTSC_OUT_WIDTH(sw);
@@ -788,8 +802,8 @@ void KMS_VIDEO_SetNtscSharpness(double s)
 
 const char *KMS_VIDEO_ScaleLabel(void)
 {
-	static const char *const labels[] = { "Integer", "Fit", "Fill", "Free" };
-	return labels[KMS_VIDEO_scale_mode >= 0 && KMS_VIDEO_scale_mode <= 3 ? KMS_VIDEO_scale_mode : 0];
+	static const char *const labels[] = { "Integer", "Fit", "Fill", "Integer+", "Free" };
+	return labels[KMS_VIDEO_scale_mode >= 0 && KMS_VIDEO_scale_mode <= 4 ? KMS_VIDEO_scale_mode : 0];
 }
 
 double KMS_VIDEO_ScaleX(void)
@@ -812,7 +826,7 @@ double KMS_VIDEO_FreeMax(int vertical)
 
 void KMS_VIDEO_ScaleFactors(char *buf, size_t size)
 {
-	if (KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER && lay_sw > 0 && lay_sh > 0
+	if ((KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER || KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER_XY) && lay_sw > 0 && lay_sh > 0
 	    && dst_w % lay_sw == 0 && dst_h % lay_sh == 0)
 		snprintf(buf, size, "%d x %d", dst_w / lay_sw, dst_h / lay_sh);
 	else
@@ -865,6 +879,7 @@ int KMS_VIDEO_ReadConfig(char *option, char *parameters)
 		else if (strcmp(parameters, "FIT") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_FIT;
 		else if (strcmp(parameters, "STRETCH") == 0 || strcmp(parameters, "FILL") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_STRETCH;
 		else if (strcmp(parameters, "FREE") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_FREE;
+		else if (strcmp(parameters, "INTEGER_XY") == 0) KMS_VIDEO_scale_mode = KMS_SCALE_INTEGER_XY;
 		else return FALSE;
 	}
 	else if (strcmp(option, "KMS_SCALE_X") == 0 || strcmp(option, "KMS_SCALE_Y") == 0) {
@@ -907,7 +922,7 @@ void KMS_VIDEO_WriteConfig(FILE *fp)
 {
 	static const char *const scan_cfg[] = { "OFF", "LIGHT", "MEDIUM", "STRONG" };
 	static const char *const border_cfg[] = { "FULL", "TV", "TIGHT" };
-	static const char *const names[] = { "INTEGER", "FIT", "STRETCH", "FREE" };
+	static const char *const names[] = { "INTEGER", "FIT", "STRETCH", "INTEGER_XY", "FREE" };
 	fprintf(fp, "KMS_SCALE=%s\n", names[KMS_VIDEO_scale_mode]);
 	fprintf(fp, "KMS_SCALE_X=%.2f\n", KMS_VIDEO_free_x);
 	fprintf(fp, "KMS_SCALE_Y=%.2f\n", KMS_VIDEO_free_y);
@@ -961,7 +976,7 @@ int KMS_VIDEO_Initialise(int *argc, char *argv[])
 				Log_print("\t-kms-debug                Log frame statistics");
 				Log_print("\t-kms-mode WxH[@Hz]        Display mode (default: preferred, rate closest to the Atari)");
 				Log_print("\t-kms-lock <Hz>            Pace by the display within this of the Atari rate (0.75; 0 = off)");
-				Log_print("\t-kms-scale integer|fit|fill|free");
+				Log_print("\t-kms-scale integer|fit|fill|integer_xy|free");
 				Log_print("\t                          How to scale the picture to the panel");
 			}
 			argv[j++] = argv[i];

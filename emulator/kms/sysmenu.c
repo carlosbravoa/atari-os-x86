@@ -383,7 +383,7 @@ static size_t hardware_lines(const char *status, char *page, size_t size)
 	add_line(page, &n, size, "Display: %s %dx%d @ %.4g Hz", KMS_VIDEO_driver, KMS_VIDEO_width, KMS_VIDEO_height, KMS_VIDEO_refresh);
 	KMS_VIDEO_ScaleFactors(w, sizeof w);
 	add_line(page, &n, size, "  %s %s%s", KMS_VIDEO_ScaleLabel(), w,
-	         KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER ? ", smooth" : "");
+	         KMS_VIDEO_smooth && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER && KMS_VIDEO_scale_mode != KMS_SCALE_INTEGER_XY ? ", smooth" : "");
 	add_line(page, &n, size, "  Scanlines %s%s%s",
 	         KMS_VIDEO_ScanlinesPossible() || KMS_VIDEO_scanlines == KMS_SCANLINES_OFF ? KMS_VIDEO_ScanlinesLabel() : "n/a",
 	         KMS_VIDEO_NtscLook() ? ", " : "", KMS_VIDEO_NtscLook() ? KMS_VIDEO_NtscPresetLabel() : "");
@@ -935,7 +935,7 @@ static int free_menu(void)
 			UI_MENU_ACTION(1, y_item),
 			UI_MENU_ACTION(2, both_item),
 			UI_MENU_LABEL(aspect_item),
-			UI_MENU_ACTION(3, "Other scaling (Integer, Fit, Fill)"),
+			UI_MENU_ACTION(3, "Other: Integer, Fit, Fill, Integer+"),
 			UI_MENU_ACTION_ACCEL(4, "Back", "Esc"),
 			UI_MENU_END
 		};
@@ -1051,7 +1051,7 @@ static void tv_look_menu(void)
 static void display_menu(void)
 {
 	static const char *const scales[] = { "Integer (sharpest)", "Fit (4:3, larger)", "Fill (whole screen)",
-	                                      "Free (set the factors)" };
+	                                      "Integer+ (whole per axis, wider)", "Free (set the factors)" };
 	static const char *const scans[] = { "Off", "Light (75%)", "Medium (50%)", "Strong (25%)" };
 	static const char *const borders[] = { "Full (384: all of it)", "TV (336, default)", "Tight (320)" };
 	static char scale_item[40], smooth_item[40], scan_item[40], border_item[40], look_item[40];
@@ -1071,7 +1071,7 @@ static void display_menu(void)
 			UI_MENU_ACTION_ACCEL(6, "Back", "Esc"),
 			UI_MENU_END
 		};
-		int integer = KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER;
+		int integer = KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER || KMS_VIDEO_scale_mode == KMS_SCALE_INTEGER_XY;
 		int pal = Atari800_tv_mode == Atari800_TV_PAL;
 		int bri = backlight_get();
 		int v;
@@ -1100,7 +1100,7 @@ static void display_menu(void)
 		case 1:
 			if (KMS_VIDEO_scale_mode == KMS_SCALE_FREE && free_menu())
 				break;
-			v = choose("Scaling", scales, 4, KMS_VIDEO_scale_mode);
+			v = choose("Scaling", scales, 5, KMS_VIDEO_scale_mode);
 			if (v == KMS_SCALE_FREE) {
 				if (KMS_VIDEO_scale_mode != KMS_SCALE_FREE) {
 					/* start from where the picture is: nothing moves yet */
@@ -1110,7 +1110,7 @@ static void display_menu(void)
 					display_changed(KMS_VIDEO_ScaleLabel());
 				}
 				if (!free_menu()) {
-					v = choose("Scaling", scales, 3, KMS_SCALE_FIT);
+					v = choose("Scaling", scales, 4, KMS_SCALE_FIT);
 					if (v >= 0) {
 						KMS_VIDEO_scale_mode = v;
 						display_changed(KMS_VIDEO_ScaleLabel());

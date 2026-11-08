@@ -292,8 +292,10 @@ with it too, and the Hardware page shows it as "Version".
 - **Eject all, back to <target>**: empties D1:-D8:, takes out the
   cartridge (not ASH's own) and the tape, and cold starts into the target
 - **Display...**: **Scaling** Integer (the largest whole factor, default),
-  Fit (the full height at the Atari's shape), Fill (the whole panel) or
-  Free (your own horizontal and vertical factors, 1.00 up to what fits,
+  Fit (the full height at the Atari's shape), Fill (the whole panel),
+  Integer+ (the largest whole factor on each axis: 5 x 4 on a 1920x1080
+  panel, wide and crisp with scanlines on whole rows; `KMS_SCALE=INTEGER_XY`)
+  or Free (your own horizontal and vertical factors, 1.00 up to what fits,
   in 0.05 steps; sliders for Horizontal, Vertical and Both, the picture
   follows while you move them, and the pixel aspect is shown: 0.95 is the
   4:3 TV shape, 1.00 square). The menu line shows the factors in use,

@@ -33,6 +33,7 @@ reply all show the version they were built from.
 - F8 System menu regrouped: Library, Boot into, Eject all, Display..., Sound, Controls..., Network..., Help, Hardware status, Save logs, Restart, Reboot, Shut down, Advanced; TV system and Brightness move into Display, Wi-Fi/IP/SSH into Network; the gamepad's Guide button opens it
 - F8 Controls: arrows as cursor keys or joystick 0, keyboard type PC (keys type their caps) or Atari (positional: Shift+2 = `"`, `-` = `<`, `[` = `-`, `'` = `+`, ...), gamepad 1 on joystick 0 or 1, gamepad buttons page (`KMS_KEYBOARD`, `KMS_PAD_SWAP`)
 - Shift+arrow keys are cursor keys too (they typed `- = + *`)
+- Display: Scaling "Integer+", the largest whole factor on each axis (5 x 4 on 1920x1080): wide, crisp, scanline-friendly
 - The build version (`git describe`) is shown at the foot of the F8 System menu and at the top of the F1 Help list
 - Module archive (modloop) 414 MB -> 242 MB: Nvidia GSP firmware (RTX 20/30 only) and Intel Wi-Fi ucode of older API versions left out; the newest file per chip stays
 - Help: the power-off warning is in inverse video (bit 7 of a character inverts it in the menus, ui_basic.c)
