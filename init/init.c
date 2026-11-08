@@ -627,7 +627,8 @@ static void walk_modalias(const char *dir, int depth)
 	DIR *d;
 	struct dirent *e;
 	char path[512];
-	char alias[256];
+	/* The x86 CPU alias lists every feature flag: ~700 bytes. */
+	char alias[2048];
 
 	if (depth > 16)
 		return;
@@ -642,6 +643,19 @@ static void walk_modalias(const char *dir, int depth)
 			walk_modalias(path, depth + 1);
 		else if (strcmp(e->d_name, "modalias") == 0 && read_file(path, alias, sizeof alias) > 0)
 			queue_alias(alias);
+		else if (strcmp(e->d_name, "uevent") == 0 && read_file(path, alias, sizeof alias) > 0) {
+			/* Some devices only announce themselves here (the CPUs:
+			   cpu:type:x86,... matches coretemp, k10temp, the RAPL and
+			   cpufreq drivers). The same string as a modalias file is
+			   deduplicated by alias_seen(). */
+			char *m = strstr(alias, "MODALIAS=");
+			if (m != NULL && (m == alias || m[-1] == '\n')) {
+				char *nl = strchr(m, '\n');
+				if (nl != NULL)
+					*nl = '\0';
+				queue_alias(m + 9);
+			}
+		}
 	}
 	closedir(d);
 }
@@ -649,7 +663,10 @@ static void walk_modalias(const char *dir, int depth)
 /* Modules nothing announces through a modalias. */
 static const char *const base_modules[] = {
 	"evdev", "loop", "squashfs", "vfat", "exfat", "ntfs3", "nls_cp437", "nls_iso8859-1",
-	"nls_utf8", "usb-storage", "uas", "sd_mod", "button", "af_packet", NULL
+	"nls_utf8", "usb-storage", "uas", "sd_mod", "button", "af_packet",
+	/* CPU temperature for the hardware page and perf log; the one that
+	   does not fit this CPU fails quietly (-q). */
+	"coretemp", "k10temp", NULL
 };
 
 static void coldplug(void)
