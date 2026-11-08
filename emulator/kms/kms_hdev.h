@@ -20,4 +20,7 @@ void KMS_HDEV_Poll(void);
 /* Called from Atari800_Coldstart(): sd: writes are switched off again. */
 void KMS_HDEV_ColdStart(void);
 
+/* Called from KMS_BOOT_EjectAll(): the XIO 41 program is out of D1: too. */
+void KMS_HDEV_EjectAll(void);
+
 #endif /* KMS_KMS_HDEV_H_ */

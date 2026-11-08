@@ -1032,6 +1032,12 @@ void KMS_HDEV_Poll(void)
 	}
 }
 
+void KMS_HDEV_EjectAll(void)
+{
+	xex_mounted = FALSE; /* D1: no longer holds the XIO 41 program */
+	xex_name[0] = '\0';
+}
+
 void KMS_HDEV_ColdStart(void)
 {
 	int h;

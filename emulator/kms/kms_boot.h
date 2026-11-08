@@ -36,5 +36,8 @@ void KMS_BOOT_EjectAll(void);
 const char *KMS_BOOT_LastRoute(void);
 /* TRUE when the last cold start left BASIC on. */
 int KMS_BOOT_BasicOn(void);
+/* What CFG_WriteConfig() writes as DISABLE_BASIC: the configured value,
+   not the one the last route set in Atari800_disable_basic. */
+int KMS_BOOT_ConfigDisableBasic(void);
 
 #endif /* KMS_KMS_BOOT_H_ */

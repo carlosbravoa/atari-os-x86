@@ -252,10 +252,9 @@ void KMS_SYSMENU_ApplySettings(void)
 		   nothing is mounted (kms/boot.c; ASH's STATUS shows it) */
 		static int asked = FALSE;
 		char status[1024], buf[16];
-		if (!asked) {
-			asked = TRUE;
-			if (ctl_request("status", status, sizeof status))
-				KMS_BOOT_SetTarget(boot_of(status, buf, sizeof buf));
+		if (!asked && ctl_request("status", status, sizeof status)) {
+			asked = TRUE; /* init may not be listening yet: try again next time */
+			KMS_BOOT_SetTarget(boot_of(status, buf, sizeof buf));
 		}
 	}
 }

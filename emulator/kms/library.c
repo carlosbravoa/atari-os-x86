@@ -765,17 +765,21 @@ static int pick_cart_type(int kb)
    the extracted copy of a zipped file. */
 static int run_file(const char *path, const char *ref, int with_basic)
 {
-	int type;
+	int type, cart_out = FALSE;
 	Log_print("library: run %s%s", path, with_basic ? " (with BASIC)" : "");
 	/* Run boots this file: a cartridge left in would win over a disk or
 	   a program (kms/boot.c only takes ASH's own one out) */
-	if (file_kind(path) != FK_CART)
+	if (file_kind(path) != FK_CART && CARTRIDGE_main.type != CARTRIDGE_NONE) {
 		CARTRIDGE_Remove();
+		cart_out = TRUE;
+	}
 	KMS_BOOT_with_basic = with_basic; /* read by the cold start below */
 	type = AFILE_OpenFile(path, TRUE, 1, FALSE);
 	KMS_BOOT_with_basic = FALSE;
 	if (type == AFILE_ERROR) {
 		cant("Could not run", path);
+		if (cart_out)
+			Atari800_Coldstart(); /* its ROM is unmapped: do not run on */
 		return FALSE;
 	}
 	if ((type & 0xff) == AFILE_ROM && (type >> 8) != 0 && !pick_cart_type(type >> 8))
@@ -1139,7 +1143,7 @@ static void copy_to_usb(const char *copy)
 
 static int is_disk_image(const char *name)
 {
-	static const char *const ext[] = { ".atr", ".xfd", ".dcm", ".atx", ".atr.gz", ".xfd.gz", NULL };
+	static const char *const ext[] = { ".atr", ".xfd", ".dcm", ".atx", ".pro", ".atr.gz", ".xfd.gz", NULL };
 	int i;
 	for (i = 0; ext[i]; i++)
 		if (Util_striendswith(name, ext[i]))

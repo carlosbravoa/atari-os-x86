@@ -40,6 +40,7 @@
 #include "netsio.h"
 #endif
 #include "kms/kms_boot.h"
+#include "kms/kms_hdev.h"
 
 #define ASH_CART "/media/atari/ash/ASH.CAR" /* ASH_CART in init/init.c */
 
@@ -132,6 +133,7 @@ void KMS_BOOT_EjectAll(void)
 	if (CASSETTE_status != CASSETTE_STATUS_NONE)
 		CASSETTE_Remove();
 	CASSETTE_hold_start = FALSE;
+	KMS_HDEV_EjectAll();
 	Log_print("boot: eject all");
 	Atari800_Coldstart();
 }
@@ -144,6 +146,12 @@ const char *KMS_BOOT_LastRoute(void)
 int KMS_BOOT_BasicOn(void)
 {
 	return basic_on;
+}
+
+int KMS_BOOT_ConfigDisableBasic(void)
+{
+	/* the live value is the last route's; the file keeps the setting */
+	return config_basic_off >= 0 ? config_basic_off : Atari800_disable_basic;
 }
 
 static void insert_ash(void)

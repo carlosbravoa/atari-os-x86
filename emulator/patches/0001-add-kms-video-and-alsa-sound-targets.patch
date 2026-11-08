@@ -177,8 +177,36 @@ index 63910a89..dd0a49fd 100644
  }
  
  #if defined(BASIC) || defined(VERY_SLOW) || defined(CURSES_BASIC)
+diff --git a/src/cfg.c b/src/cfg.c
+index 55291755..967ed40a 100644
+--- a/src/cfg.c
++++ b/src/cfg.c
+@@ -64,6 +64,9 @@
+ #endif
+ #if defined(HAVE_LIBPNG) || defined(HAVE_LIBZ) || defined(AUDIO_RECORDING) || defined(VIDEO_RECORDING)
+ #include "file_export.h"
++#ifdef KMS
++#include "kms/kms_boot.h"
++#endif
+ #endif
+ 
+ int CFG_save_on_exit = FALSE;
+@@ -438,7 +441,13 @@ int CFG_WriteConfig(void)
+ 	fprintf(fp, "AXLON_RAM_NUM_BANKS=%d\n", MEMORY_axlon_num_banks);
+ 	fprintf(fp, "ENABLE_MAPRAM=%d\n", MEMORY_enable_mapram);
+ 
++#ifdef KMS
++	/* atari-os-x86: every cold start sets Atari800_disable_basic for its
++	   route (kms/boot.c); the file keeps the user's setting */
++	fprintf(fp, "DISABLE_BASIC=%d\n", KMS_BOOT_ConfigDisableBasic());
++#else
+ 	fprintf(fp, "DISABLE_BASIC=%d\n", Atari800_disable_basic);
++#endif
+ 	fprintf(fp, "TURBO_SPEED=%d\n", Atari800_turbo_speed);
+ 	fprintf(fp, "ENABLE_SIO_PATCH=%d\n", ESC_enable_sio_patch);
+ 	fprintf(fp, "ENABLE_SLOW_XEX_LOADING=%d\n", BINLOAD_slow_xex_loading);
 diff --git a/src/sio.c b/src/sio.c
-index 9a5b7104..a9b394db 100644
+index 9a5b7104..53e3edb0 100644
 --- a/src/sio.c
 +++ b/src/sio.c
 @@ -45,6 +45,9 @@
@@ -248,12 +276,18 @@ index 9a5b7104..a9b394db 100644
  #endif /* NETSIO */
  		if (TransferStatus != SIO_NoFrame) 
  #ifdef NETSIO
-@@ -1537,7 +1566,12 @@ void SIO_SwitchCommandFrame(int onoff)
+@@ -1537,7 +1566,18 @@ void SIO_SwitchCommandFrame(int onoff)
  	else
  	{
  #ifdef NETSIO
 +#ifdef KMS
-+		kms_cmd_on_pending = FALSE; /* nothing was sent: FujiNet saw no frame */
++		/* COMMAND ON still pending: FujiNet never saw this frame begin (a
++		   local drive, or boot-time bytes kept here by
++		   BINLOAD_start_binloading), so it must not be asked for a sync
++		   response either: finish the frame locally */
++		if (kms_cmd_on_pending)
++			kms_local_frame = TRUE;
++		kms_cmd_on_pending = FALSE;
 +		if (netsio_enabled && !kms_local_frame)
 +#else
  		if (netsio_enabled)
@@ -261,7 +295,7 @@ index 9a5b7104..a9b394db 100644
  		{
  			if (CommandIndex < ExpectedBytes)
  			{
-@@ -1597,6 +1631,12 @@ static UBYTE WriteSectorBack(void)
+@@ -1597,6 +1637,12 @@ static UBYTE WriteSectorBack(void)
  #ifdef NETSIO
  void NetSIO_PutByte(int byte)
  {
@@ -274,7 +308,7 @@ index 9a5b7104..a9b394db 100644
  #ifdef DEBUG2
  	Log_print("NetSIO_PutByte_%d: %02x", TransferStatus, byte);
  #endif
-@@ -1663,7 +1703,19 @@ void NetSIO_PutByte(int byte)
+@@ -1663,7 +1709,19 @@ void NetSIO_PutByte(int byte)
  void SIO_PutByte(int byte)
  {
  #ifdef NETSIO
@@ -295,7 +329,7 @@ index 9a5b7104..a9b394db 100644
  	{
  		NetSIO_PutByte(byte);
  		return;
-@@ -1824,7 +1876,7 @@ int SIO_GetByte(void)
+@@ -1824,7 +1882,7 @@ int SIO_GetByte(void)
  	int byte = 0;
  
  #ifdef NETSIO
