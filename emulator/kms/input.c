@@ -285,12 +285,20 @@ static void handle_inotify(void)
 
 /* ---- event processing ------------------------------------------------- */
 
-static int axis_dir(int value, int lo, int hi)
+/* A stick direction: engages at a quarter of the travel from the centre
+   (it was half, which a thumb takes 30-60 ms to reach: felt as lag) and
+   releases at an eighth, so a stick held near the edge does not chatter.
+   PREV is the direction reported so far. */
+static int axis_dir(int value, int lo, int hi, int prev)
 {
 	int centre = (lo + hi) / 2;
-	int dead = (hi - lo) / 4;
-	if (value < centre - dead) return -1;
-	if (value > centre + dead) return 1;
+	int half = (hi - lo) / 2;
+	int engage = half / 4, release = half / 8;
+	int off = value - centre;
+	if (off < -engage) return -1;
+	if (off > engage) return 1;
+	if (prev < 0 && off < -release) return -1;
+	if (prev > 0 && off > release) return 1;
 	return 0;
 }
 
@@ -308,8 +316,8 @@ static void pad_event(struct pad_state *p, const struct input_event *ev)
 	if (ev->type == EV_ABS) {
 		int x = p->x, y = p->y, hx = p->hx, hy = p->hy;
 		switch (ev->code) {
-		case ABS_X: p->x = axis_dir(ev->value, p->xmin, p->xmax); break;
-		case ABS_Y: p->y = axis_dir(ev->value, p->ymin, p->ymax); break;
+		case ABS_X: p->x = axis_dir(ev->value, p->xmin, p->xmax, p->x); break;
+		case ABS_Y: p->y = axis_dir(ev->value, p->ymin, p->ymax, p->y); break;
 		case ABS_HAT0X: p->hx = ev->value < 0 ? -1 : ev->value > 0 ? 1 : 0; break;
 		case ABS_HAT0Y: p->hy = ev->value < 0 ? -1 : ev->value > 0 ? 1 : 0; break;
 		default: break;
