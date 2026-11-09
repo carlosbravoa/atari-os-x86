@@ -108,7 +108,10 @@ param(
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
+# 32-bit Windows in UEFI mode means 32-bit UEFI firmware (Bay Trail tablets,
+# 64-bit CPU): that firmware runs BOOTIA32.EFI, which boots the same kernel.
 $LoaderPath = '\EFI\BOOT\BOOTX64.EFI'
+if (-not [Environment]::Is64BitOperatingSystem) { $LoaderPath = '\EFI\BOOT\BOOTIA32.EFI' }
 $Sidecar = 'atari-os\windows-install.json'
 $MinBytes = [uint64]1536 * [uint64]1048576
 $GuidRe = '\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}'
@@ -230,7 +233,7 @@ function Find-OurEntries([string]$Kind) {
         $lines = $b.Text -split "\r?\n"
         $hasPath = $false; $hasName = $false
         foreach ($l in $lines) {
-            if ($l -match '\s(\\EFI\\BOOT\\BOOTX64\.EFI)\s*$') { $hasPath = $true }
+            if ($l -match '\s(\\EFI\\BOOT\\BOOT(X64|IA32)\.EFI)\s*$') { $hasPath = $true }
             if ($l -match ('\s' + [regex]::Escape($Name) + '\s*$')) { $hasName = $true }
         }
         if ($hasPath -and $hasName) { $found += $b.Guid }
@@ -280,6 +283,8 @@ function Test-Zip([string]$Path) {
     foreach ($need in @('efi/boot/bootx64.efi', 'atari-os/vmlinuz', 'atari-os/initramfs', 'limine.conf')) {
         if (-not $names.ContainsKey($need)) { Fail "$Path has no $need`: not an atari-os-x86 files zip" }
     }
+    $loader = $LoaderPath.TrimStart('\').Replace('\', '/').ToLower()
+    if (-not $names.ContainsKey($loader)) { Fail "$Path has no $loader (this machine has 32-bit UEFI): use a newer release" }
     return $total
 }
 

@@ -92,8 +92,8 @@ cards, not the stick itself).
 
 What gets copied is the stick's FAT as it is: the system, `atari/` with
 your library, settings and FujiNet SD. The disk boots on BIOS (Limine in
-the MBR, partition marked active) and UEFI (`\EFI\BOOT\BOOTX64.EFI`, plus a
-firmware boot entry "Atari"). **The installer puts that entry first in the
+the MBR, partition marked active) and UEFI (`\EFI\BOOT\BOOTX64.EFI`, or
+`BOOTIA32.EFI` on 32-bit UEFI, plus a firmware boot entry "Atari"). **The installer puts that entry first in the
 machine's UEFI boot order.** It is the only place this project changes the
 boot order, and only because you have just typed ERASE for a disk that will
 hold no other system; an "Atari" entry from an earlier install is reused.
@@ -189,8 +189,29 @@ back); the partition and its files stay. The execution policy is not
 changed: `-ExecutionPolicy Bypass` applies to that one run. With Windows'
 Fast Startup on, Windows keeps the ATARI drive open over a shutdown: do not
 change its files from both Windows and the Atari between two starts (or turn
-Fast Startup off). **Tested on Windows 11 by: nobody yet.** BIOS-mode
+Fast Startup off). On 32-bit Windows (Bay Trail tablets: 32-bit UEFI, 64-bit
+CPU) the entry starts `BOOTIA32.EFI` instead of `BOOTX64.EFI`. **Tested on Windows 11 by: nobody yet.** BIOS-mode
 Windows machines: use the stick.
+
+## Hardware
+
+x86_64 PCs and laptops, BIOS or UEFI, including 32-bit UEFI on a 64-bit
+CPU (Bay Trail and Cherry Trail tablets and netbooks of 2013-2016: the stick
+has Limine's `BOOTIA32.EFI` next to `BOOTX64.EFI`; QEMU-tested only).
+Secure Boot must be off.
+
+- **Wi-Fi** with a free driver and its firmware on the stick: Intel
+  (iwlwifi), Atheros (ath9k, ath10k: QCA6174, QCA9377, QCA988x; ath9k_htc
+  USB sticks), Realtek (rtlwifi, rtw88, rtw89: RTL8723BE, RTL8821CE,
+  RTL8822BE/CE, RTL8852AE/BE, ...), Broadcom with a free driver (brcmfmac
+  PCIe and USB, e.g. BCM4350/4356/43602 and the SDIO chips of x86 tablets;
+  brcmsmac; b43 without its firmware, which is not redistributable),
+  MediaTek mt76 (MT7921/MT7922/MT7925, MT76x0U, MT76x2, MT7601U).
+  **BCM43142 and BCM4352 have no free driver** (Broadcom `wl` only): use a
+  USB Wi-Fi adapter or Ethernet. Wi-Fi 6E/7 Atheros (ath11k/ath12k) is not
+  included.
+- **Ethernet**: Intel, Realtek (r8169 with its firmware), Broadcom tg3,
+  Atheros, USB adapters (ASIX, Realtek, CDC).
 
 ## How it works
 
@@ -216,7 +237,7 @@ core is the planned second core.
 ## Stick layout
 
 ```
-/EFI/BOOT/BOOTX64.EFI   /limine-bios.sys   /limine.conf
+/EFI/BOOT/BOOTX64.EFI  BOOTIA32.EFI   /limine-bios.sys   /limine.conf
 /atari-os/vmlinuz  initramfs  modloop.sqfs      ← the system (replace to update)
 /atari/library  disks  carts  roms  config      ← yours
 /atari/fujinet/fnconfig.ini  SD/                ← FujiNet's config and "SD card"
@@ -658,11 +679,14 @@ console and verbose kernel messages.
 
 ### Headless testing
 
-`scripts/qemu-test.sh` drives QEMU without a display: `start [bios|uefi]`,
+`scripts/qemu-test.sh` drives QEMU without a display: `start [bios|uefi|uefi32]`,
 `wait [seconds]` (until the emulator runs), `key <name>` (QEMU sendkey
 names), `shot <png>`, `serial "<cmd>"` (runs a command on the debug shell),
 `log`, `mon "<cmd>"` (QEMU monitor), `stop`. `QEMU_IMG` picks another image,
-`OVMF_CODE` the UEFI firmware. Build a debug image with
+`OVMF_CODE` the UEFI firmware. `uefi32` is 32-bit UEFI on the 64-bit CPU
+(a Bay Trail tablet); it needs `build/ovmf32/OVMF32_CODE_4M.fd` and
+`OVMF32_VARS_4M.fd`, copied out of Debian's `ovmf-ia32` package (unpack the
+`.deb` with `dpkg-deb -x`; Ubuntu and Arch have no 32-bit OVMF). Build a debug image with
 `EXTRA_CMDLINE="console=ttyS0,115200 atari.debug=1"` for `serial` to work,
 or turn a release image into one with `qemu-test.sh debug-image <img>`
 (edits its `limine.conf`; needs mtools).

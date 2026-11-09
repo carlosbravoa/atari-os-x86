@@ -2172,6 +2172,16 @@ static void put64(uint8_t *p, uint64_t v)
 
 #define EFI_ATARI_DESC "Atari"
 #define EFI_ATARI_FILE "\\EFI\\BOOT\\BOOTX64.EFI"
+#define EFI_ATARI_FILE32 "\\EFI\\BOOT\\BOOTIA32.EFI" /* 32-bit UEFI, 64-bit CPU (Bay Trail) */
+
+/* The loader for this machine's firmware: 32-bit UEFI runs BOOTIA32.EFI. */
+static const char *efi_atari_file(void)
+{
+	char sz[8];
+	if (read_file("/sys/firmware/efi/fw_platform_size", sz, sizeof sz) > 0 && strcmp(sz, "32") == 0)
+		return EFI_ATARI_FILE32;
+	return EFI_ATARI_FILE;
+}
 
 /* Is this load option (without the attribute prefix) one of ours? */
 static int efi_option_is_atari(const uint8_t *opt, int len)
@@ -2187,7 +2197,8 @@ static int efi_option_is_atari(const uint8_t *opt, int len)
 }
 
 /* The installer's firmware entry: Boot#### "Atari" =
-   HD(1,MBR,<signature>,<start>,<size>)/\EFI\BOOT\BOOTX64.EFI, put first
+   HD(1,MBR,<signature>,<start>,<size>)/\EFI\BOOT\BOOTX64.EFI (BOOTIA32.EFI
+   on 32-bit UEFI), put first
    in BootOrder. This is the one place the boot order is changed, and only
    because the user has just typed ERASE for a disk that will hold no
    other system. An "Atari" entry from an earlier install is reused. */
@@ -2195,7 +2206,7 @@ static int efi_install_entry(uint32_t sig, uint64_t start, uint64_t size, char *
 {
 	uint8_t opt[256], order[4 + 256], cur[4 + 256], neworder[256];
 	char name[16], path[200];
-	const char *file = EFI_ATARI_FILE;
+	const char *file = efi_atari_file();
 	int n, dp, i, k, len, cnt, num = -1;
 
 	put32(opt, 1); /* LOAD_OPTION_ACTIVE */
@@ -2731,6 +2742,7 @@ static int install_run(const char *disk)
 	if (d)
 		closedir(d);
 	if (!exists(INSTALL_MNT "/limine-bios.sys") || !exists(INSTALL_MNT "/EFI/BOOT/BOOTX64.EFI")
+	    || (strcmp(efi_atari_file(), EFI_ATARI_FILE32) == 0 && !exists(INSTALL_MNT "/EFI/BOOT/BOOTIA32.EFI"))
 	    || !exists(INSTALL_MNT "/atari-os/modloop.sqfs")) {
 		umount2(INSTALL_MNT, MNT_DETACH);
 		return inst_fail(S_COPY, "the copy lacks the boot files");

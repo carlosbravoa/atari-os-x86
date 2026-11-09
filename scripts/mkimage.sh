@@ -11,6 +11,7 @@
 # Layout of the stick:
 #
 #   /EFI/BOOT/BOOTX64.EFI     UEFI loader (Limine)
+#   /EFI/BOOT/BOOTIA32.EFI    the same for 32-bit UEFI firmware
 #   /limine-bios.sys          BIOS loader stage (plus code in the MBR)
 #   /limine.conf
 #   /atari-os/vmlinuz         Alpine linux-lts
@@ -46,9 +47,16 @@ IMG_MB=${IMG_MB:-1024}
 CMDLINE="quiet loglevel=3 drm_kms_helper.fbdev_emulation=0 vt.global_cursor_default=0 i915.enable_psr=0 i915.enable_fbc=1 nmi_watchdog=0 usbhid.jspoll=1 usbhid.kbpoll=1 usbhid.mousepoll=1 ${EXTRA_CMDLINE:-}"
 
 # Firmware: GPUs, Intel Wi-Fi (linux-firmware-intel carries iwlwifi), the
-# SOF audio DSP on 2019+ Intel laptops, and the wireless regulatory db.
+# SOF audio DSP on 2019+ Intel laptops, the wireless regulatory db, and the
+# other laptop Wi-Fi families with a free driver (docs/specs/firmware-2.md):
+# Atheros ath10k/ath9k_htc, Realtek rtlwifi/rtw88/rtw89, Broadcom brcmfmac
+# (cypress holds the BCM4356/43570 PCIe files brcm/ links to), MediaTek
+# mt76; plus Realtek Ethernet (r8169). Pruned in step 3.
 FIRMWARE_PKGS="linux-firmware-i915 linux-firmware-radeon linux-firmware-nvidia linux-firmware-amdgpu
-	linux-firmware-intel sof-firmware wireless-regdb"
+	linux-firmware-intel sof-firmware wireless-regdb
+	linux-firmware-ath10k linux-firmware-ath9k_htc linux-firmware-rtlwifi linux-firmware-rtw88
+	linux-firmware-rtw89 linux-firmware-brcm linux-firmware-cypress linux-firmware-mediatek
+	linux-firmware-rtl_nic"
 
 # Modules that must be inside the initramfs: enough to see the stick and
 # the keyboard before the modloop is available. Dependencies are resolved
@@ -378,6 +386,35 @@ if [ -d "$BUILD/modloop/firmware/intel/iwlwifi" ]; then
 		| sort -k1,1 -k2,2n | awk '{ if ($1 == prev) print last; prev = $1; last = $3 }' \
 		| while read -r f; do rm -f "$BUILD/modloop/firmware/intel/iwlwifi/$f"; done
 fi
+FW=$BUILD/modloop/firmware
+# - Intel QuickAssist (datacenter crypto cards)
+rm -rf "$FW/intel/qat" "$FW"/qat_*
+# - MediaTek: only the mt76 laptop/USB Wi-Fi files (no Bluetooth, routers,
+#   Chromebook SoCs; not mt7615/mt7663/mt7668 either: Alpine's kernel has no
+#   driver for them)
+for f in "$FW"/mediatek/* "$FW"/mediatek/mt7925/*; do
+	case "${f##*/}" in
+		mt7925) ;;
+		WIFI_RAM_CODE_MT79*|WIFI_MT79*|mt7961*|mt7650*|mt7610*|mt7662*|mt76x0*|mt76x2*|mt7601*) ;;
+		*) rm -rf "$f" ;;
+	esac
+done
+# - Broadcom: PCIe and USB brcmfmac, b43; SDIO only for the chips of x86
+#   tablets/mini PCs (Bay Trail/Cherry Trail; their .txt files are named by
+#   DMI, the ARM boards' by a "vendor,board" name); no Bluetooth .hcd
+for f in "$FW"/brcm/* "$FW"/cypress/*; do
+	n=${f##*/}
+	case "$n" in
+		*raspberrypi*|*,*|*rpiltd*|*-minimal.*|*-standard.*) rm -f "$f" ;;
+		brcmfmac43241b4-sdio.*|brcmfmac43340-sdio.*|brcmfmac43362-sdio.*|brcmfmac43430a0-sdio.*|brcmfmac43455-sdio.*) ;;
+		cyfmac43340-sdio.*|cyfmac43362-sdio.*|cyfmac43455-sdio.*) ;;
+		*-sdio.*|*-sdio-*|BCM*.hcd*|bcm4329-*|43439A0-*) rm -f "$f" ;;
+	esac
+done
+# - Atheros ath10k: not the WCN3990 (phone SoCs) nor the router/AP chips
+rm -rf "$FW/ath10k/WCN3990" "$FW/ath10k/QCA4019" "$FW/ath10k/QCA9888" "$FW/ath10k/QCA9984" "$FW/ath10k/QCA99X0"
+# - Intel Bluetooth (14 MB): there is no Bluetooth stack
+rm -f "$FW"/intel/ibt-*
 find "$BUILD/modloop/firmware" -type l | while read -r l; do [ -e "$l" ] || rm -f "$l"; done  # dangling symlinks (busybox find has no -xtype)
 log "modloop firmware: $(du -sm "$BUILD/modloop/firmware" | cut -f1) MB"
 # Prune the modules (MODLOOP_PRUNE above). $STAGE keeps the full set: its
@@ -477,7 +514,7 @@ STICK=$BUILD/stick
 rm -rf "$STICK"
 mkdir -p "$STICK/EFI/BOOT" "$STICK/atari-os" "$STICK/atari/disks" "$STICK/atari/carts" \
 	"$STICK/atari/roms" "$STICK/atari/config" "$STICK/atari/library"
-cp /usr/share/limine/BOOTX64.EFI "$STICK/EFI/BOOT/"
+cp /usr/share/limine/BOOTX64.EFI /usr/share/limine/BOOTIA32.EFI "$STICK/EFI/BOOT/"  # IA32: 32-bit UEFI on a 64-bit CPU (Bay Trail)
 cp /usr/share/limine/limine-bios.sys "$STICK/"
 cp "$STAGE/boot/vmlinuz-lts" "$STICK/atari-os/vmlinuz"
 cp "$BUILD/initramfs.zst" "$STICK/atari-os/initramfs"

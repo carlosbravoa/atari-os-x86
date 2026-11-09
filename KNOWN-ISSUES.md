@@ -49,9 +49,18 @@
 - **Clock**: laptops with a dead CMOS cell boot in 2016; init sets the time
   from the network once DHCP is up and writes it back to the RTC, but until
   then TLS (HTTPS hosts in FujiNet) fails.
-- **Module archive** (modloop) is 194 MB after dropping Nvidia GSP and old
+- **Module archive** (modloop) is 201 MB after dropping Nvidia GSP and old
   Intel Wi-Fi firmware and the driver classes below; AMD GPU firmware (26 MB)
-  is kept whole, per-GPU trimming is possible later.
+  is kept whole, per-GPU trimming is possible later. The Wi-Fi firmware of
+  the non-Intel families adds about 23 MB; Intel's unused Bluetooth
+  firmware (14 MB) and the ath10k router chips went out at the same time.
+- **Wi-Fi left out**: Wi-Fi 6E/7 Atheros (ath11k/ath12k; their firmware is
+  40 MB), Broadcom BCM43142/BCM4352 and others that only Broadcom's `wl`
+  drives, b43's firmware (not redistributable), Apple's Broadcom firmware
+  (BCM4364/4377/4378: only macOS has it), the Broadcom SDIO chips of ARM
+  boards and phones, MediaTek MT7615/MT7663 (no driver in Alpine's kernel).
+  A USB Wi-Fi adapter or Ethernet works around all of them. No Bluetooth
+  at all (no Bluetooth stack). 32-bit UEFI is tested in QEMU only.
 - **Drivers left out of the modloop** (to keep it small): no TV tuners,
   DVB or capture cards, no FC/SAS/iSCSI host adapters or hardware RAID,
   no cluster or network filesystems (NFS, Ceph, GFS2, ...), no datacenter

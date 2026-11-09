@@ -39,7 +39,7 @@ BUILD_PKGS="alpine-base build-base autoconf automake libtool pkgconf git
             linux-headers libdrm-dev alsa-lib-dev zlib-dev
             cmake samurai python3 py3-jinja2 py3-yaml expat-dev openssl-dev argp-standalone
             cpio squashfs-tools mtools xorriso dosfstools sfdisk zstd xz zip curl
-            limine limine-bios limine-efi-x86_64 dropbear dropbear-convert"
+            limine limine-bios limine-efi-x86_64 limine-efi-x86 dropbear dropbear-convert"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }

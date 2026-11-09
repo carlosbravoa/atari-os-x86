@@ -1,7 +1,8 @@
 #!/bin/sh
 # qemu-test.sh - headless QEMU harness for automated checks
 #
-#   scripts/qemu-test.sh start [bios|uefi]   boot build/atari-os.img (or $QEMU_IMG) in the background
+#   scripts/qemu-test.sh start [bios|uefi|uefi32]  boot build/atari-os.img (or $QEMU_IMG) in the background
+#                                            (uefi32: 32-bit UEFI firmware from build/ovmf32/)
 #   scripts/qemu-test.sh wait [seconds]      wait until atari800 runs (debug image; default 180 s, 600 s without KVM)
 #   scripts/qemu-test.sh serial "<cmd>"      run a shell command on the serial console (debug image)
 #   scripts/qemu-test.sh key <qemu-key>      press a key (QEMU sendkey names, e.g. ret, f1, a)
@@ -117,16 +118,24 @@ start)
 		[ -f "$IMG" ] || { echo "no image at $IMG (QEMU_IMG)" >&2; exit 1; }
 	fi
 	FW=""
-	if [ "$MODE" = uefi ]; then
-		for f in ${OVMF_CODE:-} /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
-			/usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/qemu/ovmf-x86_64-code.bin; do
+	# uefi32: 32-bit UEFI on the 64-bit CPU (Bay Trail tablets), from
+	# build/ovmf32/ (Debian's ovmf-ia32, see docs/specs/firmware-2.md)
+	O32=$PROJECT/build/ovmf32
+	case "$MODE" in
+		uefi) CODES="/usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/qemu/ovmf-x86_64-code.bin"
+			VARS="/usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/ovmf/OVMF_VARS.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd" ;;
+		uefi32) CODES="$O32/OVMF32_CODE_4M.fd $O32/OVMF_CODE.4m.fd"; VARS="$O32/OVMF32_VARS_4M.fd $O32/OVMF_VARS.4m.fd" ;;
+		bios) ;;
+		*) echo "start: bios, uefi or uefi32" >&2; exit 1 ;;
+	esac
+	if [ "$MODE" != bios ]; then
+		for f in ${OVMF_CODE:-} $CODES; do
 			[ -f "$f" ] && { FW="-drive if=pflash,format=raw,readonly=on,file=$f"; break; }
 		done
 		[ -n "$FW" ] || { echo "no OVMF firmware found (install ovmf or set OVMF_CODE)" >&2; exit 1; }
 		if [ -n "${QEMU_VARS:-}" ]; then
 			if [ ! -f "$QEMU_VARS" ]; then
-				for f in ${OVMF_VARS:-} /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
-					/usr/share/edk2/ovmf/OVMF_VARS.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
+				for f in ${OVMF_VARS:-} $VARS; do
 					[ -f "$f" ] && { cp "$f" "$QEMU_VARS"; break; }
 				done
 			fi
@@ -136,7 +145,7 @@ start)
 	fi
 	# SeaBIOS only tries the first hard disk: the image must be it. OVMF
 	# gets no bootindex, which would make it rewrite BootOrder from QEMU's.
-	BI=""; [ "$MODE" = uefi ] || BI=",bootindex=0"
+	BI=""; [ "$MODE" != bios ] || BI=",bootindex=0"
 	case "${QEMU_IMG_AS:-usb}" in
 		usb) MAIN="-device usb-storage,bus=xhci.0,drive=stick,removable=on$BI" ;;
 		ide) MAIN="-device ide-hd,drive=stick$BI" ;;
