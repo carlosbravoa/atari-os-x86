@@ -132,4 +132,14 @@ int KMS_VIDEO_Wake(double *p50_ms, double *p99_ms, double *max_ms);
 extern int KMS_VIDEO_jit;
 int KMS_VIDEO_Jit(double *lead_ms, int *late);
 
+/* The lid (kms/main.c): InternalPanel is TRUE when the picture is on the
+   laptop's own panel (eDP, LVDS, DSI; a VM's virtual screen too), FALSE
+   with an external monitor (a closed lid then changes nothing). Blank(TRUE)
+   turns that panel off (connector DPMS; without the property only a log
+   line), Blank(FALSE) on again with a modeset of the last picture and the
+   pacing and just-in-time state reset. FALSE, doing nothing, when the
+   panel is not internal. */
+int KMS_VIDEO_InternalPanel(void);
+int KMS_VIDEO_Blank(int off);
+
 #endif /* KMS_KMS_KMS_VIDEO_H_ */

@@ -281,19 +281,26 @@ ls -la "$ABUILD/initramfs.zst"
 # that depend on a pruned one go too; the build fails if anything the
 # ZenBook, init.c or the keep-list below needs would go.
 MODLOOP_PRUNE="
-# TV tuners, DVB, capture cards, camera sensors, IR receivers; kept: the
-# media core, CEC (the GPU drivers need it) and UVC webcams (the ZenBook
-# loads uvcvideo; snd-usb-audio needs mc)
+# Webcams, TV tuners, DVB, capture cards, camera sensors, IR receivers,
+# and V4L2 itself (docs/specs/lid-and-no-camera-bluetooth.md): all of
+# drivers/media but two parts other drivers need, the media controller
+# core mc (snd-usb-audio: USB sound cards and headsets) and CEC (the GPU
+# drivers: i915, amdgpu, radeon, nouveau, xe)
+drivers/media/usb drivers/media/common drivers/media/v4l2-core
 drivers/media/dvb-core drivers/media/dvb-frontends drivers/media/firewire
 drivers/media/i2c drivers/media/pci drivers/media/platform drivers/media/rc
 drivers/media/spi drivers/media/tuners drivers/media/radio drivers/media/mmc
-drivers/media/test-drivers drivers/media/common/b2c2 drivers/media/common/siano
-drivers/media/common/cx2341x drivers/media/common/cypress_firmware
-drivers/media/common/ttpci-eeprom drivers/media/common/tveeprom
-drivers/media/usb/b2c2 drivers/media/usb/cx231xx drivers/media/usb/dvb-usb
-drivers/media/usb/dvb-usb-v2 drivers/media/usb/em28xx drivers/media/usb/gspca
-drivers/media/usb/s2255 drivers/media/usb/ttusb-budget drivers/media/usb/ttusb-dec
-drivers/media/usb/usbtv
+drivers/media/test-drivers
+# Bluetooth and NFC: no stack, no pairing; gamepads and keyboards are USB
+# (toshiba_bluetooth only powers a Toshiba's Bluetooth radio on). The bare
+# core bluetooth.ko and the chip's own btrsi stay (a "!" entry puts one
+# module back after its directory is pruned): the Redpine RS9113 Wi-Fi
+# driver (rsi_91x, cheap laptops of 2016-2019) links against both, and
+# without a stack they do nothing
+drivers/bluetooth !drivers/bluetooth/btrsi
+net/bluetooth/rfcomm net/bluetooth/bnep net/bluetooth/hidp
+net/bluetooth/cmtp net/bluetooth/bluetooth_6lowpan
+drivers/nfc drivers/platform/x86/toshiba_bluetooth
 # server, cluster and virtualisation host hardware; embedded buses (kept:
 # drivers/dca, igb needs it)
 drivers/infiniband drivers/md drivers/mtd drivers/iio drivers/xen drivers/vhost
@@ -349,8 +356,10 @@ net/rxrpc net/smc net/sunrpc
 "
 # Must survive the prune (section C of the spec): what init.c always loads
 # (base_modules[] in init/init.c; keep this in step with it), the
-# initramfs's set, and drivers for laptops in the wild. The 182 modules the
-# test ZenBook loads are read from docs/specs/zenbook-modules.txt.
+# initramfs's set, and drivers for laptops in the wild. The modules the
+# test ZenBook loads are read from docs/specs/zenbook-modules.txt (169: its
+# 182 less the webcam and Bluetooth drivers, pruned on purpose since
+# docs/specs/lid-and-no-camera-bluetooth.md; mc stays, snd-usb-audio needs it).
 MODLOOP_BASE_MODULES="evdev loop squashfs vfat exfat ntfs3 nls_cp437 nls_iso8859-1
 	nls_utf8 usb-storage uas sd_mod button af_packet coretemp k10temp"
 MODLOOP_KEEP="ath9k ath10k_pci ath11k_pci ath5k rtw88_pci rtw88_8822be rtw88_8822ce
@@ -373,9 +382,8 @@ MODLOOP_KEEP="ath9k ath10k_pci ath11k_pci ath5k rtw88_pci rtw88_8822be rtw88_882
 	hid_logitech_dj hid_nintendo hid_playstation hid_steam hid_multitouch
 	i2c_hid i2c_hid_acpi psmouse synaptics_usb elan_i2c atkbd coretemp
 	k10temp k8temp fam15h_power acpi_cpufreq intel_pstate
-	processor_thermal_device pcc_cpufreq btusb btintel btrtl
-	btbcm ath3k usbhid hid_generic evdev uinput loop squashfs vfat
-	exfat ntfs3 ext4 btrfs xfs nvme ahci ata_piix pata_acpi nls_cp437
+	processor_thermal_device pcc_cpufreq usbhid hid_generic evdev uinput
+	loop squashfs vfat exfat ntfs3 ext4 btrfs xfs nvme ahci ata_piix pata_acpi nls_cp437
 	nls_iso8859_1 nls_utf8 nls_cp850 nls_cp1252 efivarfs efi_pstore
 	firewire_ohci firewire_sbp2 ohci_pci ehci_pci xhci_pci uhci_hcd
 	pcspkr cdc_acm ftdi_sio pl2303 cp210x ch341 usbserial
@@ -426,8 +434,18 @@ for f in "$FW"/brcm/* "$FW"/cypress/*; do
 done
 # - Atheros ath10k: not the WCN3990 (phone SoCs) nor the router/AP chips
 rm -rf "$FW/ath10k/WCN3990" "$FW/ath10k/QCA4019" "$FW/ath10k/QCA9888" "$FW/ath10k/QCA9984" "$FW/ath10k/QCA99X0"
-# - Intel Bluetooth (14 MB): there is no Bluetooth stack
+# - Bluetooth: there is no Bluetooth stack (and no driver, MODLOOP_PRUNE):
+#   Intel (14 MB), Qualcomm/Atheros, Realtek, MediaTek, TI and the
+#   Synaptics/Broadcom patch files; most are not in the firmware packages
+#   installed, the patterns cover them if one ever brings them along
 rm -f "$FW"/intel/ibt-*
+rm -rf "$FW/qca" "$FW/rtl_bt" "$FW/ar3k" "$FW"/ti-connectivity/TIInit_*
+rm -f "$FW"/mediatek/BT_RAM_CODE_* "$FW"/rtlwifi/rtl8723bs_bt.* "$FW"/synaptics/*.hcd*
+rm -f "$FW"/brcm/*.hcd*
+rmdir "$FW/synaptics" 2>/dev/null || true  # only the two Bluetooth .hcd were in it
+# - Cameras: Intel IPU3/IPU6/IPU7 and Atom ISP image processors, the
+#   Visual Sensing Controller (8 MB; their drivers are not in the modloop)
+rm -rf "$FW/intel/ipu" "$FW/intel/vsc"
 find "$ABUILD/modloop/firmware" -type l | while read -r l; do [ -e "$l" ] || rm -f "$l"; done  # dangling symlinks (busybox find has no -xtype)
 log "modloop firmware: $(du -sm "$ABUILD/modloop/firmware" | cut -f1) MB"
 # Prune the modules (MODLOOP_PRUNE above). $STAGE keeps the full set: its
@@ -439,10 +457,20 @@ mods_count() { find "$MODS/kernel" -name '*.ko*' | wc -l; }
 before_mb=$(mods_mb); before_n=$(mods_count)
 absent=""
 for p in $(printf '%s\n' "$MODLOOP_PRUNE" | sed 's/#.*//'); do
+	case $p in !*) continue ;; esac
 	found=0
 	[ -d "$MODS/kernel/$p" ] && { rm -rf "$MODS/kernel/$p"; found=1; }
 	for f in "$MODS/kernel/$p".ko*; do [ -f "$f" ] && { rm -f "$f"; found=1; }; done
 	[ $found = 1 ] || absent="$absent $p"
+done
+# "!path": one module kept out of a pruned directory, copied back from $STAGE.
+for p in $(printf '%s\n' "$MODLOOP_PRUNE" | sed 's/#.*//' | tr ' \t' '\n\n' | grep '^!' | sed 's/^!//'); do
+	found=0
+	for f in "$STAGE/lib/modules/$KVER/kernel/$p".ko*; do
+		[ -f "$f" ] || continue
+		mkdir -p "$MODS/kernel/$(dirname "$p")" && cp -p "$f" "$MODS/kernel/$(dirname "$p")/" && found=1
+	done
+	[ $found = 1 ] || absent="$absent !$p"
 done
 [ -n "$absent" ] && log "modloop prune: not in this kernel:$absent"
 # Modules that need a pruned one (per the original modules.dep) go too,

@@ -110,6 +110,15 @@ static int flip_supported = 1;
 
 static uint32_t crtc_id = 0;
 static uint32_t conn_id = 0;
+static uint32_t conn_type = 0; /* DRM_MODE_CONNECTOR_* of conn_id */
+static uint32_t dpms_prop = 0; /* the connector's DPMS property, 0: not looked up / none */
+static int dpms_looked = FALSE;
+static int blanked = FALSE;    /* KMS_VIDEO_Blank(TRUE): the panel is off */
+/* Flips after the panel came back on that give no input-lag or wake-up
+   sample: the first lands whenever the restarted vblank does, not when
+   the frame asked for it. */
+static int settle_flips = 0;
+static int flip_settling = FALSE; /* the last flip event was one of them */
 static drmModeModeInfo mode;
 static drmModeCrtc *saved_crtc = NULL;
 
@@ -417,6 +426,14 @@ static int connector_rank(uint32_t type)
 	}
 }
 
+int KMS_VIDEO_InternalPanel(void)
+{
+	/* A virtual machine's screen (bochs-drm, virtio-gpu, QXL: "Virtual")
+	   counts too: it is the machine's own and only one, and a lid in a VM
+	   is only ever a test (scripts/qemu-test.sh, a uinput lid). */
+	return drm_fd >= 0 && (connector_rank(conn_type) == 0 || conn_type == DRM_MODE_CONNECTOR_VIRTUAL);
+}
+
 static int pick_output(drmModeRes *res)
 {
 	int i, j;
@@ -441,6 +458,7 @@ static int pick_output(drmModeRes *res)
 		return FALSE;
 
 	conn_id = best->connector_id;
+	conn_type = best->connector_type;
 	mode = best->modes[choose_mode(best)];
 
 	/* CRTC: the one currently driving this connector, else any possible one. */
@@ -1427,8 +1445,15 @@ static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsi
 	(void)fd; (void)data;
 	flip_pending = 0;
 	last_flip_ts = ts;
-	if (flip_input_ts > 0)
-		lat_sample(ts);
+	flip_settling = settle_flips > 0;
+	if (flip_settling)
+		settle_flips--;
+	if (flip_input_ts > 0) {
+		if (flip_settling)
+			flip_input_ts = 0;
+		else
+			lat_sample(ts);
+	}
 	/* Without sequence numbers (bochs-drm, simpledrm) the flip events
 	   come when the flip is queued, not at a vblank: nothing to count. */
 	if (frame != 0 && have_seq)
@@ -1485,7 +1510,7 @@ static int flip_wait_for(double max_s)
 	}
 	/* woken by the flip: the delay from its vblank to running again (not
 	   when the flip had landed before we started waiting) */
-	if (done && last_flip_ts >= start_clk)
+	if (done && last_flip_ts >= start_clk && !flip_settling)
 		wake_sample(clock_now() - last_flip_ts);
 	frame_waited += Util_time() - start;
 	return done;
@@ -1538,6 +1563,97 @@ void PLATFORM_Sleep(double s)
 	t0 = Util_time() - t0;
 	frame_waited += t0;
 	wake_sample(t0 - s);
+}
+
+/* ---- lid closed: panel off -------------------------------------------- */
+
+/* The connector's "DPMS" property id, looked up once; 0 when it has none. */
+static uint32_t find_dpms(void)
+{
+	drmModeObjectProperties *props;
+	uint32_t i;
+	if (dpms_looked)
+		return dpms_prop;
+	dpms_looked = TRUE;
+	props = drmModeObjectGetProperties(drm_fd, conn_id, DRM_MODE_OBJECT_CONNECTOR);
+	if (!props)
+		return 0;
+	for (i = 0; i < props->count_props && !dpms_prop; i++) {
+		drmModePropertyRes *p = drmModeGetProperty(drm_fd, props->props[i]);
+		if (!p)
+			continue;
+		if (strcmp(p->name, "DPMS") == 0)
+			dpms_prop = p->prop_id;
+		drmModeFreeProperty(p);
+	}
+	drmModeFreeObjectProperties(props);
+	if (!dpms_prop)
+		Log_print("kms: the connector has no DPMS property: the lid only pauses");
+	return dpms_prop;
+}
+
+/* Read any page flip event still queued, without waiting. */
+static void drain_events(void)
+{
+	drmEventContext ev;
+	memset(&ev, 0, sizeof ev);
+	ev.version = 2;
+	ev.page_flip_handler = page_flip_handler;
+	for (;;) {
+		fd_set fds;
+		struct timeval tv;
+		FD_ZERO(&fds);
+		FD_SET(drm_fd, &fds);
+		tv.tv_sec = 0;
+		tv.tv_usec = 0;
+		if (select(drm_fd + 1, &fds, NULL, NULL, &tv) <= 0)
+			break;
+		if (drmHandleEvent(drm_fd, &ev) != 0)
+			break;
+	}
+}
+
+int KMS_VIDEO_Blank(int off)
+{
+	if (!KMS_VIDEO_InternalPanel())
+		return FALSE;
+	if (off) {
+		if (blanked)
+			return TRUE;
+		/* the last flip lands first: its event must not be taken for the
+		   first flip after the wake */
+		wait_flip();
+		if (find_dpms() && drmModeConnectorSetProperty(drm_fd, conn_id, dpms_prop, DRM_MODE_DPMS_OFF))
+			Log_print("kms: DPMS off failed: %s", strerror(errno));
+		blanked = TRUE;
+		return TRUE;
+	}
+	if (!blanked)
+		return TRUE;
+	blanked = FALSE;
+	if (dpms_prop && drmModeConnectorSetProperty(drm_fd, conn_id, dpms_prop, DRM_MODE_DPMS_ON))
+		Log_print("kms: DPMS on failed: %s", strerror(errno));
+	drain_events();
+	/* a full modeset with the picture last shown restarts the flip chain
+	   from a known state, whatever the driver did while the panel was off */
+	if (drmModeSetCrtc(drm_fd, crtc_id, fbs[front].fb_id, 0, 0, &conn_id, 1, &mode))
+		Log_print("kms: modeset after the lid failed: %s", strerror(errno));
+	/* Pacing and the just-in-time frame start over: no flip in flight, no
+	   vblank stamp or sequence to measure the next flip against (its gap
+	   and its wake-up would be minutes long), no input stamp waiting for
+	   a picture. The input-lag and wake rings keep their history; nothing
+	   from before the pause can now land in them. */
+	flip_pending = 0;
+	have_seq = FALSE;
+	last_seq = 0;
+	last_flip_ts = 0;
+	flip_input_ts = frame_input_ts = 0;
+	flip_jit = jit_armed = frame_jit = FALSE;
+	frame_paced = frame_vbl = FALSE;
+	frame_waited = 0;
+	jit_reset();
+	settle_flips = 2; /* the first after the modeset, and one more to be sure */
+	return TRUE;
 }
 
 /* ---- input lag ------------------------------------------------------- */

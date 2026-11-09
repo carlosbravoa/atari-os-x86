@@ -6,7 +6,8 @@
  *
  * Reads /dev/input/event* directly (no udev, no libinput). Keyboards are
  * grabbed so a VT underneath never sees the keys. Devices are classified
- * from their capability bits and hot-plugged through inotify.
+ * from their capability bits and hot-plugged through inotify. The lid
+ * switch (EV_SW/SW_LID) is read too: kms/main.c pauses while it is shut.
  *
  * Key layout (US-style keycaps; the F1 Help page lists it too, kms/help.c):
  *   F1 Help   F2 OPTION  F3 SELECT  F4 START   F5 reset (Shift: cold)
@@ -41,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <poll.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <time.h>
@@ -58,12 +60,14 @@
 #include "kms/kms_input.h"
 #include "kms/kms_library.h"
 #include "kms/kms_sysmenu.h"
+#include "kms/kms_video.h"
 
 int KMS_INPUT_arrows_joystick = FALSE; /* F11 toggles; FujiNet CONFIG and BASIC need cursor keys */
 int KMS_INPUT_keyboard_pc = TRUE;      /* FALSE: Atari (positional) keyboard type */
 int KMS_INPUT_pad_swap = FALSE;        /* gamepad 1 drives joystick 1 and gamepad 2 joystick 0 */
 int KMS_INPUT_menu_owner = 0;          /* 1, 8 or 9: the F-key whose menu is open (0: none) */
 int KMS_INPUT_close_menus = FALSE;     /* F1/F8/F9 inside a menu: close it (see menu_key) */
+int KMS_INPUT_lid_closed = FALSE;      /* a lid switch reports closed (kms/main.c pauses) */
 static int debug_keys = FALSE; /* -evdev-debug: log every key event */
 /* Input lag (kms/video.c): the clock the devices stamp their events with
    (KMS_INPUT_SetClock) and the oldest press, release or stick move read
@@ -71,12 +75,16 @@ static int debug_keys = FALSE; /* -evdev-debug: log every key event */
 static int ev_clock = CLOCK_REALTIME;
 static double ev_oldest = 0;
 static int devs_ready = FALSE; /* devs[] initialised */
+static double last_poll = 0;   /* -evdev-debug: when the devices were last read */
 
 #define INPUT_DIR "/dev/input"
 #define MAX_DEVS 32
 #define MAX_PADS 4
 
-enum dev_type { DEV_NONE, DEV_KEYBOARD, DEV_PAD, DEV_HOTKEYS };
+/* DEV_LID: a lid switch and nothing else we read (the ACPI "Lid Switch"
+   has EV_SW only). A keyboard or hotkey device that also has SW_LID keeps
+   its own type; struct dev's lid says it has the switch. */
+enum dev_type { DEV_NONE, DEV_KEYBOARD, DEV_PAD, DEV_HOTKEYS, DEV_LID };
 
 struct pad_state {
 	int x, y;        /* -1, 0, 1 from the main stick */
@@ -91,6 +99,7 @@ struct dev {
 	enum dev_type type;
 	char name[32]; /* "eventN" */
 	int pad;       /* index into pads[] for DEV_PAD */
+	int lid;       /* has SW_LID: -1 no, 0 open, 1 closed */
 };
 
 static struct dev devs[MAX_DEVS];
@@ -117,6 +126,45 @@ static int xioctl(int fd, unsigned long req, void *arg)
 
 /* ---- device discovery ------------------------------------------------- */
 
+/* TRUE when the device reports the lid switch (EV_SW with SW_LID). */
+static int has_lid(int fd)
+{
+	uint8_t evbits[(EV_CNT + 7) / 8];
+	uint8_t swbits[(SW_CNT + 7) / 8];
+
+	memset(evbits, 0, sizeof evbits);
+	memset(swbits, 0, sizeof swbits);
+	if (xioctl(fd, EVIOCGBIT(0, sizeof evbits), evbits) < 0 || !BIT_SET(evbits, EV_SW))
+		return FALSE;
+	if (xioctl(fd, EVIOCGBIT(EV_SW, sizeof swbits), swbits) < 0)
+		return FALSE;
+	return BIT_SET(swbits, SW_LID) != 0;
+}
+
+/* The lid's position now (EVIOCGSW): TRUE closed. Read when the device
+   is opened, so a machine booted with the lid shut (or the emulator
+   restarted under a closed lid) starts paused. */
+static int lid_state(int fd)
+{
+	uint8_t swstate[(SW_CNT + 7) / 8];
+
+	memset(swstate, 0, sizeof swstate);
+	if (xioctl(fd, EVIOCGSW(sizeof swstate), swstate) < 0)
+		return FALSE;
+	return BIT_SET(swstate, SW_LID) != 0;
+}
+
+/* KMS_INPUT_lid_closed: closed when any lid switch says so; a removed
+   one no longer counts (the lid is taken as open). */
+static void update_lid(void)
+{
+	int i, closed = FALSE;
+	for (i = 0; i < MAX_DEVS; i++)
+		if (devs[i].fd >= 0 && devs[i].lid > 0)
+			closed = TRUE;
+	KMS_INPUT_lid_closed = closed;
+}
+
 static int classify(int fd)
 {
 	uint8_t evbits[(EV_CNT + 7) / 8];
@@ -130,7 +178,7 @@ static int classify(int fd)
 	if (xioctl(fd, EVIOCGBIT(0, sizeof evbits), evbits) < 0)
 		return DEV_NONE;
 	if (!BIT_SET(evbits, EV_KEY))
-		return DEV_NONE;
+		return has_lid(fd) ? DEV_LID : DEV_NONE;
 	xioctl(fd, EVIOCGBIT(EV_KEY, sizeof keybits), keybits);
 	if (BIT_SET(evbits, EV_ABS))
 		xioctl(fd, EVIOCGBIT(EV_ABS, sizeof absbits), absbits);
@@ -151,7 +199,7 @@ static int classify(int fd)
 				return DEV_PAD;
 		}
 	}
-	return DEV_NONE;
+	return has_lid(fd) ? DEV_LID : DEV_NONE;
 }
 
 static void read_abs_range(int fd, int axis, int *lo, int *hi)
@@ -188,6 +236,10 @@ static void close_dev(int i)
 	close(devs[i].fd);
 	devs[i].fd = -1;
 	devs[i].type = DEV_NONE;
+	if (devs[i].lid >= 0) {
+		devs[i].lid = -1;
+		update_lid();
+	}
 }
 
 static void open_dev(const char *name)
@@ -216,6 +268,7 @@ static void open_dev(const char *name)
 	devs[i].fd = fd;
 	devs[i].type = type;
 	devs[i].pad = -1;
+	devs[i].lid = -1;
 	Util_strlcpy(devs[i].name, name, sizeof devs[i].name);
 	desc[0] = '\0';
 	xioctl(fd, EVIOCGNAME(sizeof desc), desc);
@@ -227,7 +280,7 @@ static void open_dev(const char *name)
 	if (type == DEV_KEYBOARD) {
 		xioctl(fd, EVIOCGRAB, (void *)1);
 	}
-	else if (type == DEV_HOTKEYS) {
+	else if (type == DEV_HOTKEYS || type == DEV_LID) {
 		/* nothing to allocate */
 	}
 	else {
@@ -246,7 +299,13 @@ static void open_dev(const char *name)
 		read_abs_range(fd, ABS_X, &pads[p].xmin, &pads[p].xmax);
 		read_abs_range(fd, ABS_Y, &pads[p].ymin, &pads[p].ymax);
 	}
-	Log_print("evdev: %s %s: %s", type == DEV_KEYBOARD ? "keyboard" : type == DEV_HOTKEYS ? "hotkeys" : "gamepad", name, desc);
+	if (has_lid(fd)) {
+		devs[i].lid = lid_state(fd);
+		update_lid();
+	}
+	Log_print("evdev: %s %s: %s%s", type == DEV_KEYBOARD ? "keyboard" : type == DEV_HOTKEYS ? "hotkeys"
+	          : type == DEV_LID ? "lid switch" : "gamepad", name, desc,
+	          devs[i].lid > 0 ? " (lid closed)" : devs[i].lid == 0 ? " (lid open)" : "");
 }
 
 static void scan_devices(void)
@@ -402,7 +461,6 @@ static void poll_events(void)
 	int i;
 
 	if (debug_keys) {
-		static double last_poll = 0;
 		double now = Util_time();
 		if (last_poll > 0 && now - last_poll > 0.05)
 			Log_print("evdev: %.0f ms since last poll", (now - last_poll) * 1000);
@@ -420,6 +478,15 @@ static void poll_events(void)
 			if (debug_keys && devs[i].type == DEV_KEYBOARD)
 				Log_print("evdev: %s: %d events in one read", devs[i].name, count);
 			for (k = 0; k < count; k++) {
+				if (evs[k].type == EV_SW) {
+					if (evs[k].code == SW_LID && devs[i].lid >= 0) {
+						devs[i].lid = evs[k].value != 0;
+						update_lid();
+					}
+					continue;
+				}
+				if (devs[i].type == DEV_LID)
+					continue;
 				if (devs[i].type == DEV_KEYBOARD)
 					key_event(&evs[k]);
 				else if (devs[i].type == DEV_HOTKEYS)
@@ -710,6 +777,20 @@ static int keyboard_inner(void)
 
 	poll_events();
 
+	/* The lid closed while a menu is open: every level of it closes, as
+	   with F1/F8/F9 inside a menu, and the main loop then pauses. An
+	   Esc every other call, so the UI driver's wait for the previous key
+	   to be released ends at once, at whatever depth the menus are (the
+	   stock menu under F8 > Advanced, a text field, a popup). Not with an
+	   external monitor driving the picture: there the lid means nothing. */
+	if (KMS_INPUT_lid_closed && UI_is_active && KMS_VIDEO_InternalPanel()) {
+		static int esc = FALSE;
+		KMS_INPUT_close_menus = TRUE;
+		key_pressed = 0;
+		esc = !esc;
+		return esc ? AKEY_ESCAPE : AKEY_NONE;
+	}
+
 	shift = key_down(KEY_LEFTSHIFT) || key_down(KEY_RIGHTSHIFT);
 	ctrl = key_down(KEY_LEFTCTRL) || key_down(KEY_RIGHTCTRL);
 	INPUT_key_shift = shift;
@@ -820,6 +901,46 @@ static int keyboard_inner(void)
 	return translate(lastkey, shift, ctrl);
 }
 
+/* ---- waiting with the lid closed ------------------------------------- */
+
+int KMS_INPUT_WaitEvent(double seconds)
+{
+	struct pollfd pfd[MAX_DEVS + 1];
+	int i, n = 0, r;
+
+	for (i = 0; i < MAX_DEVS; i++) {
+		if (devs[i].fd >= 0) {
+			pfd[n].fd = devs[i].fd;
+			pfd[n].events = POLLIN;
+			pfd[n].revents = 0;
+			n++;
+		}
+	}
+	if (inotify_fd >= 0) { /* a device plugged in or removed */
+		pfd[n].fd = inotify_fd;
+		pfd[n].events = POLLIN;
+		pfd[n].revents = 0;
+		n++;
+	}
+	/* EINTR (SIGTERM from init) returns at once: the caller checks */
+	r = poll(pfd, (nfds_t)n, seconds > 0 ? (int)(seconds * 1000.0) : 0);
+	last_poll = 0; /* a wait, not a slow frame: nothing for -evdev-debug to report */
+	poll_events();
+	return r > 0;
+}
+
+void KMS_INPUT_Discard(void)
+{
+	int p;
+	/* a tap is otherwise kept until reported once (key_event) */
+	key_pressed = 0;
+	release_pending = 0;
+	key_reported = 1;
+	for (p = 0; p < MAX_PADS; p++)
+		pads[p].menu = 0; /* Guide: would open the System menu */
+	ev_oldest = 0;
+}
+
 /* ---- input lag ------------------------------------------------------- */
 
 void KMS_INPUT_SetClock(int clock_id)
@@ -880,6 +1001,7 @@ int KMS_INPUT_Initialise(int *argc, char *argv[])
 	for (i = 0; i < MAX_DEVS; i++) {
 		devs[i].fd = -1;
 		devs[i].type = DEV_NONE;
+		devs[i].lid = -1;
 	}
 	for (i = 0; i < MAX_PADS; i++)
 		pad_owner[i] = -1;

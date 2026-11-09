@@ -27,6 +27,11 @@ extern int KMS_INPUT_pad_swap;
 extern int KMS_INPUT_menu_owner;
 extern int KMS_INPUT_close_menus;
 
+/* TRUE while a lid switch (evdev EV_SW/SW_LID, the ACPI "Lid Switch")
+   reports the lid closed; a removed switch counts as open. kms/main.c
+   pauses and blanks the panel while it is set; an open menu closes. */
+extern int KMS_INPUT_lid_closed;
+
 /* Row I of the positional (Atari keyboard type) table: the PC key and
    what it types plain and with Shift. FALSE past the end. */
 int KMS_INPUT_PositionalKey(int i, const char **pc, const char **plain, const char **shifted);
@@ -40,6 +45,14 @@ void KMS_INPUT_WriteConfig(FILE *fp);
    feed INPUT_key_code (AKEY_NONE when nothing is held) and updates
    INPUT_key_shift / INPUT_key_consol. */
 int KMS_INPUT_Keyboard(void);
+
+/* Sleep up to SECONDS until an input device (or the hotplug watch) has
+   something, then read it all as KMS_INPUT_Keyboard does (keys, sticks,
+   the lid, devices coming and going). TRUE when anything arrived. */
+int KMS_INPUT_WaitEvent(double seconds);
+/* Forget the key and gamepad presses read so far (the ones made with the
+   lid closed): nothing pending is reported. Held keys stay held. */
+void KMS_INPUT_Discard(void);
 
 /* Input lag (kms/video.c measures it): CLOCK_ID (CLOCK_MONOTONIC or
    CLOCK_REALTIME) is the clock every device stamps its events with, the

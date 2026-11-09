@@ -130,6 +130,34 @@ int PLATFORM_TRIG(int num)
 	return KMS_INPUT_Trig(num);
 }
 
+/* The lid is closed and the picture is on the laptop's own panel: sound
+   off, panel off, the Atari stopped, until it opens. Only USB volumes and
+   disk drives are looked after meanwhile (a stick plugged in or pulled
+   out); keys and buttons pressed with the lid shut are dropped. Wi-Fi,
+   SSH and FujiNet are other processes and carry on. SIGTERM (shutdown
+   from the power button) ends the wait too. */
+static void lid_pause(void)
+{
+#ifdef SOUND
+	Sound_Pause();
+#endif
+	KMS_VIDEO_Blank(TRUE);
+	Log_print("kms: lid closed, screen off, paused");
+	while (KMS_INPUT_lid_closed && !quit_requested) {
+		KMS_INPUT_WaitEvent(0.5);
+		KMS_LIBRARY_Poll();
+		KMS_HDEV_Poll();
+	}
+	KMS_INPUT_Discard();
+	KMS_SYSMENU_requested = KMS_HELP_requested = KMS_LIBRARY_requested = FALSE;
+	KMS_VIDEO_Blank(FALSE);
+#ifdef SOUND
+	Sound_Continue();
+#endif
+	if (!KMS_INPUT_lid_closed)
+		Log_print("kms: lid open, screen on");
+}
+
 int main(int argc, char **argv)
 {
 	/* stdout is a log file on the appliance: keep it line-buffered. */
@@ -169,6 +197,12 @@ int main(int argc, char **argv)
 		KMS_VIDEO_WaitFrame();
 		INPUT_key_code = PLATFORM_Keyboard();
 		input_t = KMS_INPUT_TakeEventTime();
+		if (KMS_INPUT_lid_closed && KMS_VIDEO_InternalPanel() && !quit_requested) {
+			lid_pause();
+			menu_ran = TRUE; /* its time and input are not the game's */
+			/* a SIGTERM that ended the wait (power button) must still quit */
+			INPUT_key_code = quit_requested ? AKEY_EXIT : AKEY_NONE;
+		}
 		if (KMS_SYSMENU_requested) {
 			KMS_SYSMENU_requested = FALSE;
 			menu_ran = TRUE;

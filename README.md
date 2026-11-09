@@ -212,6 +212,9 @@ Secure Boot must be off.
   included.
 - **Ethernet**: Intel, Realtek (r8169 with its firmware), Broadcom tg3,
   Atheros, USB adapters (ASIX, Realtek, CDC).
+- **No webcam and no Bluetooth drivers**, on purpose: the stick leaves them
+  out, so a built-in camera or Bluetooth chip stays off. Bluetooth gamepads
+  and keyboards are not supported; USB ones are.
 
 ## How it works
 
@@ -413,6 +416,14 @@ with it too, and the Hardware page shows it as "Version".
   management, recording). Its "System menu" entry comes back here, Esc
   goes back to the Atari; it also has "Library" and "Shut down the
   laptop"
+
+**Closing the lid** turns the laptop's screen off and pauses the Atari
+(sound off too); opening it brings the picture back where it was. A menu
+open at the time closes. Wi-Fi, SSH and FujiNet keep running, so a closed
+laptop still drains its battery slowly: for the night, shut it down from
+F8 or with the power button (which works with the lid closed too). With
+an external monitor driving the picture the lid changes nothing. There is
+no real suspend yet; that is a later experiment.
 
 Boot shows an Atari-style splash with progress lines; the first boots show
 a "F1 = Help   F8 = System   F9 = Library" hint under the picture until
@@ -644,7 +655,8 @@ image, for the local scripts; older `build/atari-os-x86-*.img` are removed
 out (release images).
 
 The module archive (`modloop.sqfs`) leaves out drivers no old laptop
-loads: TV tuners, DVB and capture cards (UVC webcams stay), InfiniBand,
+loads: webcams (all of V4L2), TV tuners, DVB and capture cards, Bluetooth
+and NFC, InfiniBand,
 RAID/LVM (`drivers/md`), FC/SAS/iSCSI host adapters, datacenter NICs
 (Mellanox, Intel ice/i40e/ixgbe, Broadcom bnxt/bnx2x, Chelsio, ...),
 cluster and network filesystems (NFS, Ceph, GFS2, OCFS2, 9p, ...), rare
@@ -825,8 +837,8 @@ Runs on real laptops. Verified on an ASUS ZenBook UX425EA (Tiger Lake):
 boot to emulator in 5.6 s, i915 at 1920x1080 with a 4x picture, SOF audio,
 Wi-Fi from the System menu, SSH, volume/brightness keys, clock sync.
 QEMU-verified: BIOS and UEFI, BASIC and FujiNet CONFIG boots, TNFS over
-the internet, DHCP, power button. Next: the media browser, lid switch,
-the Altirra core, i686 netbooks; see KNOWN-ISSUES.md.
+the internet, DHCP, power button, the lid (screen off and pause). Next:
+the media browser, suspend, the Altirra core, i686 netbooks; see KNOWN-ISSUES.md.
 
 ## Licence
 

@@ -54,14 +54,19 @@
   straight back into the Atari, no firmware boot entry from the installer.
   Some x86_64-only drivers (Intel xe, vmd, the Tiger Lake thermal and
   uncore drivers, AMD SOF audio) do not exist in it.
-- **Lid switch** does nothing yet (volume/brightness keys work).
+- **Lid closed = screen off and pause, not suspend**: the machine keeps
+  running (Wi-Fi, SSH, FujiNet), a few watts, so a closed laptop drains
+  its battery in hours, not days; shut it down for the night. Laptops whose
+  firmware also handles the lid (turns the backlight off itself) do the same
+  thing twice, harmlessly.
 - **ZenBook UX425EA reports its battery as absent** (ACPI `BAT0` absent at
   boot), so the menu shows no battery level there. Not investigated.
 - **Clock**: laptops with a dead CMOS cell boot in 2016; init sets the time
   from the network once DHCP is up and writes it back to the RTC, but until
   then TLS (HTTPS hosts in FujiNet) fails.
-- **Module archive** (modloop) is 201 MB after dropping Nvidia GSP and old
-  Intel Wi-Fi firmware and the driver classes below; AMD GPU firmware (26 MB)
+- **Module archive** (modloop) is 190 MB after dropping Nvidia GSP and old
+  Intel Wi-Fi firmware, the camera and Bluetooth drivers and firmware, and
+  the driver classes below; AMD GPU firmware (26 MB)
   is kept whole, per-GPU trimming is possible later. The Wi-Fi firmware of
   the non-Intel families adds about 23 MB; Intel's unused Bluetooth
   firmware (14 MB) and the ath10k router chips went out at the same time.
@@ -70,15 +75,18 @@
   drives, b43's firmware (not redistributable), Apple's Broadcom firmware
   (BCM4364/4377/4378: only macOS has it), the Broadcom SDIO chips of ARM
   boards and phones, MediaTek MT7615/MT7663 (no driver in Alpine's kernel).
-  A USB Wi-Fi adapter or Ethernet works around all of them. No Bluetooth
-  at all (no Bluetooth stack). 32-bit UEFI is tested in QEMU only.
+  A USB Wi-Fi adapter or Ethernet works around all of them. 32-bit UEFI is
+  tested in QEMU only.
+- **No Bluetooth** (no drivers, no stack, no pairing): Bluetooth gamepads,
+  keyboards and headphones do not work; use USB ones (a USB headset or
+  sound card works). **No webcam** either (no V4L2).
 - **Drivers left out of the modloop** (to keep it small): no TV tuners,
   DVB or capture cards, no FC/SAS/iSCSI host adapters or hardware RAID,
   no cluster or network filesystems (NFS, Ceph, GFS2, ...), no datacenter
   NICs (Mellanox, Intel ice/i40e/ixgbe, Broadcom bnxt, ...), no
   InfiniBand, device-mapper/MD RAID, netfilter, IIO sensors
   (accelerometers, ambient light; also the Cherry Trail AXP288 battery
-  gauge) or NFC. See "Building" in the README to put a class back.
+  gauge), NFC, webcams or Bluetooth. See "Building" in the README to put a class back.
 - **Installing onto the laptop's disk** (F8): Secure Boot must be off on
   UEFI machines (Limine is unsigned), as for the stick. The installer
   makes exactly one partition over the whole disk and erases everything
