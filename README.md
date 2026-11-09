@@ -651,6 +651,38 @@ keep-list there (Wi-Fi, Ethernet, GPU, sound, laptop and input drivers).
 Write the image with `scripts/flash.sh build/atari-os.img` (see Install).
 Secure Boot must be disabled on UEFI machines.
 
+### 32-bit machines (experimental)
+
+For laptops whose CPU has no 64-bit mode: Core Duo and Core Solo (2006),
+Pentium M, Celeron M and the Atom N270/N280 netbooks (Core 2 Duo and Atom
+N450 or newer are 64-bit: use the normal image). The image is
+`atari-os-x86-<version>-i686.img` (version `<version>-i686`, which the
+Hardware page and `status` show), built from Alpine's x86 packages: the
+same kernel version, a kernel without PAE (`CONFIG_HIGHMEM4G`: it starts
+on every Pentium M, uses up to 4 GB of RAM), userspace built for Pentium M
+(SSE2). 512 MB of RAM is enough. It boots on BIOS, the firmware these
+laptops have; it also carries `BOOTIA32.EFI` for 32-bit UEFI and
+`BOOTX64.EFI`, which starts the 32-bit kernel on 64-bit UEFI too, but
+there the kernel has no EFI runtime services (no reboot straight back into
+the Atari, no firmware boot entry from the installer). Tested in QEMU only
+(Atom N270 and Pentium III models; QEMU runs SSE2 code even on the
+latter), not yet on real hardware.
+
+```sh
+ARCH=x86 scripts/alpine-env.sh bootstrap                  # once: build/alpine-x86/
+ARCH=x86 scripts/alpine-env.sh run scripts/build-emulator.sh
+ARCH=x86 scripts/alpine-env.sh run scripts/build-fujinet.sh
+ARCH=x86 scripts/alpine-env.sh run scripts/mkimage.sh     # -> build/atari-os-x86-<version>-i686.img
+QEMU_IMG=build/atari-os-i686.img QEMU_SYSTEM=qemu-system-i386 QEMU_CPU=n270 QEMU_MEM=512 \
+  scripts/qemu-test.sh start bios
+```
+
+`ARCH=x86` runs the environment under `setarch i686`; its intermediate
+files (emulator, FujiNet, stage, initramfs, modloop) live under
+`build/i686/`, `build/atari-os-i686.img` is its hard link, and each
+architecture's build removes only its own older images. The modloop is
+smaller (about 150 MB against 195 MB). CI does not build it yet.
+
 ### Releases and CI
 
 `.github/workflows/build.yml` runs on every push and pull request: the image
@@ -684,9 +716,15 @@ console and verbose kernel messages.
 names), `shot <png>`, `serial "<cmd>"` (runs a command on the debug shell),
 `log`, `mon "<cmd>"` (QEMU monitor), `stop`. `QEMU_IMG` picks another image,
 `OVMF_CODE` the UEFI firmware. `uefi32` is 32-bit UEFI on the 64-bit CPU
-(a Bay Trail tablet); it needs `build/ovmf32/OVMF32_CODE_4M.fd` and
-`OVMF32_VARS_4M.fd`, copied out of Debian's `ovmf-ia32` package (unpack the
-`.deb` with `dpkg-deb -x`; Ubuntu and Arch have no 32-bit OVMF). Build a debug image with
+(a Bay Trail tablet); it needs the 32-bit firmware in `build/ovmf32/`:
+`OVMF32_CODE_4M.fd` and `OVMF32_VARS_4M.fd` out of Debian's `ovmf-ia32`
+package (unpack the `.deb` with `dpkg-deb -x`), or QEMU's `edk2-i386-code.fd`
+and `-vars.fd` out of Alpine's `qemu-system-i386` and `qemu-edk2-i386-vars`
+packages saved as `OVMF_CODE.4m.fd` and `OVMF_VARS.4m.fd` (Ubuntu and Arch
+ship no 32-bit OVMF). `QEMU_SYSTEM` (default `qemu-system-x86_64`),
+`QEMU_CPU` (a model, e.g. `n270`) and `QEMU_MEM` (MB, default 1024) are for
+the 32-bit image (a model's missing instructions, such as SSE2 on
+`pentium3`, still run in QEMU). Build a debug image with
 `EXTRA_CMDLINE="console=ttyS0,115200 atari.debug=1"` for `serial` to work,
 or turn a release image into one with `qemu-test.sh debug-image <img>`
 (edits its `limine.conf`; needs mtools).

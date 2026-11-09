@@ -11,6 +11,8 @@ reply all show the version they were built from.
 - Input lag one frame less for everyone: every frame waits for the previous frame's vblank before it reads the input (was Low latency only), so Normal mode shows a key at the next vblank, about 1.5 frames (25 ms at 60 Hz) instead of 2.5 (41 ms); same CPU, same sleeps
 - Low latency: the just-in-time frame. After the vblank the emulator sleeps until a lead before the next one (95th percentile of the emulate + draw time + 1 ms, at least 2 ms, plus 1 ms more after each late frame, shrinking again after 600 on time), then reads the input, emulates and flips: about half a frame + the lead (11 ms avg at 60 Hz, was 26). Hardware page `Frame: 0.8 ms emu, lead 3.0, late 0`, `-kms-debug` `jit lead 3.0 ms, late 0`; off by itself after two frames longer than a vblank in a row (`kms: jit off`), until the display settings change; `KMS_JIT=0` turns it off for comparisons. Its sound buffer is 10 ms x 5 (50 ms, was 40: one underrun a minute in QEMU with the writes just before the vblank)
 
+- A 32-bit image for machines without x86_64 (Core Duo/Solo, Pentium M, Atom N270/N280), experimental and tested in QEMU only: `ARCH=x86` for `alpine-env.sh` (a second environment, `build/alpine-x86/`), the build scripts and `mkimage.sh` give `atari-os-x86-<version>-i686.img` (version `<version>-i686`); non-PAE kernel, BIOS plus `BOOTIA32.EFI` and `BOOTX64.EFI`. `qemu-test.sh` gains `QEMU_SYSTEM`, `QEMU_CPU`, `QEMU_MEM` and a `uefi32` firmware choice. atari800's IDE debug prints no longer use `PRId64` (`%lld` on i686, rejected by `-ansi -pedantic -Werror`)
+
 ## v0.1.0 (2026-11-08)
 
 - Boots x86_64 PCs and laptops straight into atari800 from one FAT32 USB stick, BIOS and UEFI (Limine)

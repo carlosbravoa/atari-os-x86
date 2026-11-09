@@ -27,6 +27,11 @@ Pick one (the stick is erased):
 - **Ventoy**: unpack it (`unxz atari-os-x86-@TAG@.img.xz`) and copy the
   `.img` onto your Ventoy stick like any other image.
 
+Machines without a 64-bit CPU (Core Duo, Pentium M, Atom N270 netbooks)
+need the experimental 32-bit image, `atari-os-x86-@TAG@-i686.img`, written
+the same way; the release workflow does not build it yet (README, "32-bit
+machines").
+
 `SHA256SUMS` has the checksums (`sha256sum -c SHA256SUMS`).
 
 ### Dual boot
@@ -57,7 +62,7 @@ menu (Wi-Fi, boot into BASIC/ASH/FujiNet, shut down), **F9** the Library.
 
 ### Hardware
 
-- 64-bit x86 (x86_64) PC or laptop; 32-bit-only machines are not supported yet
+- 64-bit x86 (x86_64) PC or laptop; 32-bit-only machines: the experimental i686 image (not attached yet)
 - BIOS or UEFI boot; on UEFI, Secure Boot must be off
 - 1 GB RAM (what it is tested with)
 - a USB stick or SD card of 1 GB or more

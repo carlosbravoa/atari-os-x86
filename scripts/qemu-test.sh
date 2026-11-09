@@ -22,6 +22,16 @@
 #   QEMU_EXTRA="-drive if=none,id=usb2,format=raw,file=build/usb-test.img
 #     -device usb-storage,bus=xhci.0,drive=usb2,removable=on" scripts/qemu-test.sh start
 # QEMU_NONET=1 boots without any network card (FujiNet offline checks).
+# uefi32 is 32-bit UEFI firmware (Atom tablets): build/ovmf32/OVMF_CODE.4m.fd
+# and OVMF_VARS.4m.fd, QEMU's edk2-i386-code.fd/-vars.fd from Alpine's
+# qemu-system-i386 and qemu-edk2-i386-vars packages (docs/specs/firmware-2.md B.3).
+# The 32-bit image (docs/specs/i686-image.md): QEMU_SYSTEM picks the QEMU
+# binary (default qemu-system-x86_64), QEMU_CPU the CPU model (default: the
+# host's with KVM, else max), QEMU_MEM the RAM in MB (default 1024). A
+# model's missing instructions (SSE2 on pentium3) still run, under KVM and
+# under QEMU's own CPU emulation alike: it tests the kernel, not userspace.
+#   QEMU_IMG=build/atari-os-i686.img QEMU_SYSTEM=qemu-system-i386 QEMU_CPU=n270 \
+#     QEMU_MEM=512 scripts/qemu-test.sh start bios
 #
 # The installer (F8 "Install onto this laptop's disk") needs internal disks
 # that survive the run: everything else is -snapshot, but each entry of
@@ -170,13 +180,14 @@ start)
 	STICK="-drive if=none,id=stick,format=raw,file=$IMG $MAIN"
 	[ -z "${QEMU_KERNEL:-}" ] || STICK=""
 	ACCEL="-cpu max"; [ -w /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
+	[ -z "${QEMU_CPU:-}" ] || { ACCEL="-cpu $QEMU_CPU"; [ -w /dev/kvm ] && ACCEL="-enable-kvm $ACCEL"; }
 	NET="-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8000-:8000,hostfwd=tcp:127.0.0.1:2222-:22 -device e1000e,netdev=n0"
 	[ -n "${QEMU_NONET:-}" ] && NET="-nic none"
 	rm -f "$D"/*.sock "$D"/serial.log
 	set --
 	[ -z "${QEMU_KERNEL:-}" ] || set -- -kernel "$KDIR/vmlinuz" -initrd "$KDIR/initramfs" -append "$KCMD"
 	# shellcheck disable=SC2086
-	nohup qemu-system-x86_64 $ACCEL $FW -m 1024 -smp 2 -machine q35 \
+	nohup "${QEMU_SYSTEM:-qemu-system-x86_64}" $ACCEL $FW -m "${QEMU_MEM:-1024}" -smp 2 -machine q35 \
 		-device qemu-xhci,id=xhci \
 		$STICK $DISKS "$@" \
 		-device usb-kbd -vga std \

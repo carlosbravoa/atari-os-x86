@@ -3,7 +3,7 @@
 #
 #   scripts/alpine-env.sh run scripts/build-fujinet.sh
 #
-# Output: build/fujinet/dist/{fujinet,data,fnconfig.ini,SD}
+# Output: build/fujinet/dist/{fujinet,data,fnconfig.ini,SD} (build/i686/... for ARCH=x86)
 #
 # FujiNet-PC wants Mbed TLS 3.x as static libraries; Alpine ships 4.x, so a
 # 3.6 LTS copy is built once into build/mbedtls3. The musl fixes in
@@ -12,9 +12,18 @@
 set -eu
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f /etc/alpine-release ] || { echo "error: run me through scripts/alpine-env.sh run $0 (or in an Alpine container)" >&2; exit 1; }
+# ARCH=x86 (set by "ARCH=x86 scripts/alpine-env.sh run"): the 32-bit build,
+# under build/i686/ (docs/specs/i686-image.md).
+ARCH=${ARCH:-x86_64}
+case "$ARCH" in
+	x86_64) ABUILD=$PROJECT/build ;;
+	x86) ABUILD=$PROJECT/build/i686 ;;
+	*) echo "error: ARCH must be x86_64 or x86, not $ARCH" >&2; exit 1 ;;
+esac
+[ "$(apk --print-arch)" = "$ARCH" ] || { echo "error: ARCH=$ARCH, but this Alpine is $(apk --print-arch) (ARCH=$ARCH scripts/alpine-env.sh run ...)" >&2; exit 1; }
 SRC=$PROJECT/third_party/fujinet-firmware
-OUT=$PROJECT/build/fujinet
-MBED=$PROJECT/build/mbedtls3
+OUT=$ABUILD/fujinet
+MBED=$ABUILD/mbedtls3
 DL=$PROJECT/build/downloads
 # 3.6.3.1 is the 3.6.3 LTS re-release (its headers say 3.6.3); the tarball
 # is checked against this sha256 (override both together).

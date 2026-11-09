@@ -29,14 +29,27 @@
 # unpacked packages, DEV_SSH_KEY=0 leaves out the developer key (release
 # builds: an image that carries authorized_keys never makes the stick
 # holder's key), KEEP_OLD_IMAGES=1 keeps older build/atari-os-x86-*.img.
+#
+# ARCH=x86 builds the 32-bit image (docs/specs/i686-image.md) in the x86
+# environment: ARCH=x86 scripts/alpine-env.sh run scripts/mkimage.sh. It is
+# build/atari-os-x86-<version>-i686.img (version "<version>-i686"), its
+# -files.zip and build/atari-os-i686.img; its intermediate files (and the
+# emulator and FujiNet builds it takes) live under build/i686/.
 
 set -eu
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f /etc/alpine-release ] || { echo "error: run me through scripts/alpine-env.sh run $0 (or in an Alpine container)" >&2; exit 1; }
 WORK=$PROJECT
 BUILD=$WORK/build
-STAGE=$BUILD/stage          # packages unpacked here
-INITRAMFS=$BUILD/initramfs  # initramfs tree
+ARCH=${ARCH:-x86_64}
+case "$ARCH" in
+	x86_64) ABUILD=$BUILD SUFFIX="" ;;
+	x86) ABUILD=$BUILD/i686 SUFFIX=-i686 ;;
+	*) echo "error: ARCH must be x86_64 or x86, not $ARCH" >&2; exit 1 ;;
+esac
+[ "$(apk --print-arch)" = "$ARCH" ] || { echo "error: ARCH=$ARCH, but this Alpine is $(apk --print-arch) (ARCH=$ARCH scripts/alpine-env.sh run ...)" >&2; exit 1; }
+STAGE=$ABUILD/stage          # packages unpacked here
+INITRAMFS=$ABUILD/initramfs  # initramfs tree
 IMG_MB=${IMG_MB:-1024}
 
 # fbdev_emulation=0: no fbcon on the panel, ever. The emulator owns the
@@ -87,7 +100,7 @@ if [ -z "${ATARI_OS_VERSION:-}" ]; then
 		ATARI_OS_VERSION=unknown
 	fi
 fi
-VERSION=$ATARI_OS_VERSION
+VERSION=$ATARI_OS_VERSION$SUFFIX
 # It ends up in a file name, on the splash and in the menus.
 case "$VERSION" in
 	*[!A-Za-z0-9._+-]* | "" | -* | .*) die "bad version string '$VERSION' (letters, digits, . _ + - only)" ;;
@@ -95,7 +108,7 @@ esac
 [ ${#VERSION} -le 40 ] || die "version string too long: $VERSION"
 OUT=$BUILD/atari-os-x86-$VERSION.img
 ZIP=$BUILD/atari-os-x86-$VERSION-files.zip   # the stick's files, for the dual-boot scripts
-LINK=$BUILD/atari-os.img    # stable name for run-qemu.sh, qemu-test.sh, mk-ventoy-test.sh
+LINK=$BUILD/atari-os$SUFFIX.img    # stable name for run-qemu.sh, qemu-test.sh, mk-ventoy-test.sh
 log "Version $VERSION"
 
 # ---- 1. unpack packages into the stage ------------------------------------
@@ -127,9 +140,9 @@ gcc -static -Os -Wall -Wextra -I"$WORK/common" -o "$INITRAMFS/init" "$WORK/init/
 strip "$INITRAMFS/init"
 
 cp "$STAGE/bin/busybox.static" "$INITRAMFS/bin/busybox"
-cp "$BUILD/emulator/src/atari800" "$INITRAMFS/usr/bin/atari800"
+cp "$ABUILD/emulator/src/atari800" "$INITRAMFS/usr/bin/atari800"
 strip "$INITRAMFS/usr/bin/atari800"
-cp "$STAGE/lib/ld-musl-x86_64.so.1" "$INITRAMFS/lib/"
+cp "$STAGE"/lib/ld-musl-*.so.1 "$INITRAMFS/lib/"
 cp "$STAGE/usr/lib/libasound.so.2" "$STAGE/usr/lib/libdrm.so.2" "$INITRAMFS/usr/lib/"
 # alsa-lib needs its configuration tree to resolve "default" (~300 KB)
 cp -r "$STAGE/usr/share/alsa/." "$INITRAMFS/usr/share/alsa/"
@@ -152,13 +165,13 @@ copy_deps() {
 }
 
 # FujiNet-PC: binary, web UI data, default config; plus its shared libraries.
-if [ -x "$BUILD/fujinet/dist/fujinet" ]; then
+if [ -x "$ABUILD/fujinet/dist/fujinet" ]; then
 	mkdir -p "$INITRAMFS/usr/lib/fujinet" "$INITRAMFS/etc/ssl/certs"
-	cp "$BUILD/fujinet/dist/fujinet" "$INITRAMFS/usr/lib/fujinet/"
+	cp "$ABUILD/fujinet/dist/fujinet" "$INITRAMFS/usr/lib/fujinet/"
 	strip "$INITRAMFS/usr/lib/fujinet/fujinet"
-	cp -r "$BUILD/fujinet/dist/data" "$INITRAMFS/usr/lib/fujinet/"
+	cp -r "$ABUILD/fujinet/dist/data" "$INITRAMFS/usr/lib/fujinet/"
 	# Empty SSID: CONFIG must not wait on a fake "Dummy Cafe" network; init drives Wi-Fi.
-	sed "s/^SSID=.*/SSID=/" "$BUILD/fujinet/dist/fnconfig.ini" > "$INITRAMFS/usr/lib/fujinet/fnconfig.ini"
+	sed "s/^SSID=.*/SSID=/" "$ABUILD/fujinet/dist/fnconfig.ini" > "$INITRAMFS/usr/lib/fujinet/fnconfig.ini"
 	copy_deps "$INITRAMFS/usr/lib/fujinet/fujinet"
 	cp "$STAGE/etc/ssl/certs/ca-certificates.crt" "$INITRAMFS/etc/ssl/certs/"
 	ln -sf certs/ca-certificates.crt "$INITRAMFS/etc/ssl/cert.pem"
@@ -258,8 +271,8 @@ rm -f "$INITRAMFS/lib/modules/$KVER/modules.dep.bin" # stale now; busybox reads 
 log "initramfs modules: $(find "$INITRAMFS/lib/modules" -name '*.ko*' | wc -l)," \
 	"loopback filesystems $(find "$INITRAMFS/lib/modules" -name '*.ko.xz' -exec cat {} + | wc -c) bytes (xz)"
 
-(cd "$INITRAMFS" && find . | cpio -o -H newc --quiet | zstd -T0 -19 -q -o "$BUILD/initramfs.zst" -f)
-ls -la "$BUILD/initramfs.zst"
+(cd "$INITRAMFS" && find . | cpio -o -H newc --quiet | zstd -T0 -19 -q -o "$ABUILD/initramfs.zst" -f)
+ls -la "$ABUILD/initramfs.zst"
 
 # ---- 3. modloop -----------------------------------------------------------
 # Kernel modules old laptops never load (docs/specs/modloop-2.md): paths
@@ -369,10 +382,10 @@ MODLOOP_KEEP="ath9k ath10k_pci ath11k_pci ath5k rtw88_pci rtw88_8822be rtw88_882
 	$INITRAMFS_MODULES $LOOPBACK_FS_MODULES"
 
 log "Building modloop (modules + firmware)"
-rm -rf "$BUILD/modloop"
-mkdir -p "$BUILD/modloop/modules" "$BUILD/modloop/firmware"
-cp -a "$STAGE/lib/modules/$KVER" "$BUILD/modloop/modules/"
-[ -d "$STAGE/lib/firmware" ] && cp -a "$STAGE/lib/firmware/." "$BUILD/modloop/firmware/"
+rm -rf "$ABUILD/modloop"
+mkdir -p "$ABUILD/modloop/modules" "$ABUILD/modloop/firmware"
+cp -a "$STAGE/lib/modules/$KVER" "$ABUILD/modloop/modules/"
+[ -d "$STAGE/lib/firmware" ] && cp -a "$STAGE/lib/firmware/." "$ABUILD/modloop/firmware/"
 # Firmware old laptops never load (the stick is 1 GiB, keep the modloop small):
 # - Nvidia GSP blobs (RTX 20/30 and later; ~100 MB): nouveau only needs
 #   them on Turing+ GPUs, and such laptops drive their panel from the
@@ -380,13 +393,13 @@ cp -a "$STAGE/lib/modules/$KVER" "$BUILD/modloop/modules/"
 # - Intel Wi-Fi ucode of older API versions (~50 MB): iwlwifi loads the
 #   newest file it finds for a chip, so only the newest per chip stays
 #   (the .pnvm files are kept as they are)
-rm -rf "$BUILD/modloop/firmware"/nvidia/*/gsp
-if [ -d "$BUILD/modloop/firmware/intel/iwlwifi" ]; then
-	ls "$BUILD/modloop/firmware/intel/iwlwifi" | sed -n 's/^\(iwlwifi-.*\)-\([0-9][0-9]*\)\.ucode\(\.zst\|\.xz\|\)$/\1 \2 &/p' \
+rm -rf "$ABUILD/modloop/firmware"/nvidia/*/gsp
+if [ -d "$ABUILD/modloop/firmware/intel/iwlwifi" ]; then
+	ls "$ABUILD/modloop/firmware/intel/iwlwifi" | sed -n 's/^\(iwlwifi-.*\)-\([0-9][0-9]*\)\.ucode\(\.zst\|\.xz\|\)$/\1 \2 &/p' \
 		| sort -k1,1 -k2,2n | awk '{ if ($1 == prev) print last; prev = $1; last = $3 }' \
-		| while read -r f; do rm -f "$BUILD/modloop/firmware/intel/iwlwifi/$f"; done
+		| while read -r f; do rm -f "$ABUILD/modloop/firmware/intel/iwlwifi/$f"; done
 fi
-FW=$BUILD/modloop/firmware
+FW=$ABUILD/modloop/firmware
 # - Intel QuickAssist (datacenter crypto cards)
 rm -rf "$FW/intel/qat" "$FW"/qat_*
 # - MediaTek: only the mt76 laptop/USB Wi-Fi files (no Bluetooth, routers,
@@ -415,11 +428,11 @@ done
 rm -rf "$FW/ath10k/WCN3990" "$FW/ath10k/QCA4019" "$FW/ath10k/QCA9888" "$FW/ath10k/QCA9984" "$FW/ath10k/QCA99X0"
 # - Intel Bluetooth (14 MB): there is no Bluetooth stack
 rm -f "$FW"/intel/ibt-*
-find "$BUILD/modloop/firmware" -type l | while read -r l; do [ -e "$l" ] || rm -f "$l"; done  # dangling symlinks (busybox find has no -xtype)
-log "modloop firmware: $(du -sm "$BUILD/modloop/firmware" | cut -f1) MB"
+find "$ABUILD/modloop/firmware" -type l | while read -r l; do [ -e "$l" ] || rm -f "$l"; done  # dangling symlinks (busybox find has no -xtype)
+log "modloop firmware: $(du -sm "$ABUILD/modloop/firmware" | cut -f1) MB"
 # Prune the modules (MODLOOP_PRUNE above). $STAGE keeps the full set: its
 # modules.dep is the reference for what depends on what.
-MODS=$BUILD/modloop/modules/$KVER
+MODS=$ABUILD/modloop/modules/$KVER
 ODEP=$STAGE/lib/modules/$KVER/modules.dep
 mods_mb() { du -sm "$MODS" | cut -f1; }
 mods_count() { find "$MODS/kernel" -name '*.ko*' | wc -l; }
@@ -434,7 +447,7 @@ done
 [ -n "$absent" ] && log "modloop prune: not in this kernel:$absent"
 # Modules that need a pruned one (per the original modules.dep) go too,
 # until nothing is left that depends on a missing module.
-(cd "$MODS" && find kernel -name '*.ko*') > "$BUILD/modloop-present"
+(cd "$MODS" && find kernel -name '*.ko*') > "$ABUILD/modloop-present"
 awk -F': *' 'NR == FNR { have[$0] = 1; next }
 	$1 in have { mods[$1] = $2 }
 	END {
@@ -446,42 +459,42 @@ awk -F': *' 'NR == FNR { have[$0] = 1; next }
 				for (i = 1; i <= n; i++) if (!(d[i] in have)) { delete have[m]; print m; changed = 1; break }
 			}
 		} while (changed)
-	}' "$BUILD/modloop-present" "$ODEP" > "$BUILD/modloop-orphans"
-(cd "$MODS" && xargs -r rm -f < "$BUILD/modloop-orphans")
-[ -s "$BUILD/modloop-orphans" ] && log "modloop prune: $(wc -l < "$BUILD/modloop-orphans") modules depending on pruned ones removed too:" \
-	"$(sed 's|.*/||; s|\.ko.*||' "$BUILD/modloop-orphans" | sort | tr '\n' ' ')"
+	}' "$ABUILD/modloop-present" "$ODEP" > "$ABUILD/modloop-orphans"
+(cd "$MODS" && xargs -r rm -f < "$ABUILD/modloop-orphans")
+[ -s "$ABUILD/modloop-orphans" ] && log "modloop prune: $(wc -l < "$ABUILD/modloop-orphans") modules depending on pruned ones removed too:" \
+	"$(sed 's|.*/||; s|\.ko.*||' "$ABUILD/modloop-orphans" | sort | tr '\n' ' ')"
 find "$MODS/kernel" -depth -type d -exec rmdir {} + 2>/dev/null || true  # the emptied ones
 # Regenerate modules.dep/alias/symbols/... for the pruned tree (depmod wants
 # <base>/lib/modules/<kver>, so the tree is moved under a temp base for it).
 modname() { sed 's|.*/||; s|\.ko.*||; s|-|_|g'; }
-(cd "$MODS" && find kernel -name '*.ko*' | sed 's|\.ko\..*|.ko|') | sort > "$BUILD/modloop-present"
-awk 'NR == FNR { have[$0] = 1; next } $0 in have' "$BUILD/modloop-present" \
+(cd "$MODS" && find kernel -name '*.ko*' | sed 's|\.ko\..*|.ko|') | sort > "$ABUILD/modloop-present"
+awk 'NR == FNR { have[$0] = 1; next } $0 in have' "$ABUILD/modloop-present" \
 	"$STAGE/lib/modules/$KVER/modules.order" > "$MODS/modules.order"
 rm -f "$MODS"/modules.*.bin
-rm -rf "$BUILD/depmod-base"
-mkdir -p "$BUILD/depmod-base/lib/modules"
-mv "$MODS" "$BUILD/depmod-base/lib/modules/$KVER"
+rm -rf "$ABUILD/depmod-base"
+mkdir -p "$ABUILD/depmod-base/lib/modules"
+mv "$MODS" "$ABUILD/depmod-base/lib/modules/$KVER"
 # (its complaint about the vmlinuz symlink, dangling here, is filtered out)
-depmod -b "$BUILD/depmod-base" "$KVER" 2> "$BUILD/depmod.err" \
-	|| { cat "$BUILD/depmod.err" >&2; mv "$BUILD/depmod-base/lib/modules/$KVER" "$MODS"; die "depmod failed"; }
-grep -v 'fstatat(.*vmlinuz)' "$BUILD/depmod.err" >&2 || true
-rm -f "$BUILD/depmod.err"
-mv "$BUILD/depmod-base/lib/modules/$KVER" "$MODS"
-rm -rf "$BUILD/depmod-base"
+depmod -b "$ABUILD/depmod-base" "$KVER" 2> "$ABUILD/depmod.err" \
+	|| { cat "$ABUILD/depmod.err" >&2; mv "$ABUILD/depmod-base/lib/modules/$KVER" "$MODS"; die "depmod failed"; }
+grep -v 'fstatat(.*vmlinuz)' "$ABUILD/depmod.err" >&2 || true
+rm -f "$ABUILD/depmod.err"
+mv "$ABUILD/depmod-base/lib/modules/$KVER" "$MODS"
+rm -rf "$ABUILD/depmod-base"
 # Safety check (spec section C): the ZenBook's modules, init.c's
 # base_modules[] and the keep-list must still be there, each with all its
 # dependencies. Names compare with '-' and '_' as equal (like modprobe).
 # Every remaining module must keep exactly its old dependencies (a module
 # that lost one would fail with "Unknown symbol").
 modloop_names() { sed 's|^\([^:]*\):.*|\1|' "$1" | modname | sort -u; }
-modloop_names "$ODEP" > "$BUILD/modloop-names-before"
-modloop_names "$MODS/modules.dep" > "$BUILD/modloop-names-after"
+modloop_names "$ODEP" > "$ABUILD/modloop-names-before"
+modloop_names "$MODS/modules.dep" > "$ABUILD/modloop-names-after"
 fail=""; unknown=""
 check_names() { # strict: 1 = must exist even before the prune
 	strict=$1; shift
 	for m in $(printf '%s\n' "$@" | modname); do
-		grep -qx "$m" "$BUILD/modloop-names-after" && continue
-		if grep -qx "$m" "$BUILD/modloop-names-before" || [ "$strict" = 1 ]; then
+		grep -qx "$m" "$ABUILD/modloop-names-after" && continue
+		if grep -qx "$m" "$ABUILD/modloop-names-before" || [ "$strict" = 1 ]; then
 			fail="$fail $m"
 		else
 			unknown="$unknown $m"
@@ -489,36 +502,44 @@ check_names() { # strict: 1 = must exist even before the prune
 	done
 }
 [ -f "$WORK/docs/specs/zenbook-modules.txt" ] || die "docs/specs/zenbook-modules.txt missing"
-check_names 1 $(cat "$WORK/docs/specs/zenbook-modules.txt")
+# The 32-bit kernel lacks some of the ZenBook's (x86_64-only drivers such
+# as xe, vmd, igen6_edac): those are listed as not in this kernel, while
+# any that exist must survive the prune as on x86_64.
+zb_strict=1; [ "$ARCH" = x86 ] && zb_strict=0
+check_names $zb_strict $(cat "$WORK/docs/specs/zenbook-modules.txt")
 check_names 1 $MODLOOP_BASE_MODULES
 check_names 0 $MODLOOP_KEEP
 [ -n "$unknown" ] && log "modloop keep-list: not in this kernel (built in or not configured):$(printf '%s\n' $unknown | sort -u | tr '\n' ' ')"
 [ -z "$fail" ] || die "modloop prune removes modules that must stay:$(printf '%s\n' $fail | sort -u | tr '\n' ' ')"
 awk -F': *' '{ n = split($2, d, " "); for (i = 1; i <= n; i++) print d[i] }' "$MODS/modules.dep" | sort -u \
-	| while read -r d; do [ -f "$MODS/$d" ] || echo "$d"; done > "$BUILD/modloop-missing"
-[ -s "$BUILD/modloop-missing" ] && die "modloop modules.dep lists missing files: $(tr '\n' ' ' < "$BUILD/modloop-missing")"
+	| while read -r d; do [ -f "$MODS/$d" ] || echo "$d"; done > "$ABUILD/modloop-missing"
+[ -s "$ABUILD/modloop-missing" ] && die "modloop modules.dep lists missing files: $(tr '\n' ' ' < "$ABUILD/modloop-missing")"
 deppairs() { awk -F': *' '{ print $1; n = split($2, d, " "); for (i = 1; i <= n; i++) print $1 " " d[i] }' "$1" | sort; }
-deppairs "$MODS/modules.dep" > "$BUILD/modloop-deps-after"
-deppairs "$ODEP" | awk 'NR == FNR { if (!index($0, " ")) have[$0] = 1; next } $1 in have' "$BUILD/modloop-deps-after" - > "$BUILD/modloop-deps-before"
-cmp -s "$BUILD/modloop-deps-before" "$BUILD/modloop-deps-after" \
-	|| die "modloop prune changed module dependencies: $(diff "$BUILD/modloop-deps-before" "$BUILD/modloop-deps-after" | head -20)"
-rm -f "$BUILD"/modloop-present "$BUILD"/modloop-orphans "$BUILD"/modloop-names-* "$BUILD"/modloop-missing "$BUILD"/modloop-deps-*
+deppairs "$MODS/modules.dep" > "$ABUILD/modloop-deps-after"
+deppairs "$ODEP" | awk 'NR == FNR { if (!index($0, " ")) have[$0] = 1; next } $1 in have' "$ABUILD/modloop-deps-after" - > "$ABUILD/modloop-deps-before"
+cmp -s "$ABUILD/modloop-deps-before" "$ABUILD/modloop-deps-after" \
+	|| die "modloop prune changed module dependencies: $(diff "$ABUILD/modloop-deps-before" "$ABUILD/modloop-deps-after" | head -20)"
+rm -f "$ABUILD"/modloop-present "$ABUILD"/modloop-orphans "$ABUILD"/modloop-names-* "$ABUILD"/modloop-missing "$ABUILD"/modloop-deps-*
 log "modloop modules: $before_mb -> $(mods_mb) MB ($before_n -> $(mods_count) modules)"
-rm -f "$BUILD/modloop.sqfs"
-mksquashfs "$BUILD/modloop" "$BUILD/modloop.sqfs" -comp zstd -Xcompression-level 15 -all-root -no-progress -quiet
-ls -la "$BUILD/modloop.sqfs"
+rm -f "$ABUILD/modloop.sqfs"
+mksquashfs "$ABUILD/modloop" "$ABUILD/modloop.sqfs" -comp zstd -Xcompression-level 15 -all-root -no-progress -quiet
+ls -la "$ABUILD/modloop.sqfs"
 
 # ---- 4. stick content -----------------------------------------------------
 log "Assembling stick content"
-STICK=$BUILD/stick
+STICK=$ABUILD/stick
 rm -rf "$STICK"
 mkdir -p "$STICK/EFI/BOOT" "$STICK/atari-os" "$STICK/atari/disks" "$STICK/atari/carts" \
 	"$STICK/atari/roms" "$STICK/atari/config" "$STICK/atari/library"
-cp /usr/share/limine/BOOTX64.EFI /usr/share/limine/BOOTIA32.EFI "$STICK/EFI/BOOT/"  # IA32: 32-bit UEFI on a 64-bit CPU (Bay Trail)
+cp /usr/share/limine/BOOTX64.EFI /usr/share/limine/BOOTIA32.EFI "$STICK/EFI/BOOT/"
+# IA32: 32-bit UEFI firmware on a 64-bit CPU (Bay Trail) boots the 64-bit kernel
+# through its mixed mode. On the 32-bit image both loaders start the 32-bit
+# kernel, BOOTX64.EFI without EFI runtime services (no efivars: no BootNext,
+# no installer boot entry). Both tested in QEMU.
 cp /usr/share/limine/limine-bios.sys "$STICK/"
 cp "$STAGE/boot/vmlinuz-lts" "$STICK/atari-os/vmlinuz"
-cp "$BUILD/initramfs.zst" "$STICK/atari-os/initramfs"
-cp "$BUILD/modloop.sqfs" "$STICK/atari-os/modloop.sqfs"
+cp "$ABUILD/initramfs.zst" "$STICK/atari-os/initramfs"
+cp "$ABUILD/modloop.sqfs" "$STICK/atari-os/modloop.sqfs"
 echo "$VERSION" > "$STICK/atari-os/VERSION"
 cat > "$STICK/limine.conf" <<EOF
 timeout: 0
@@ -618,6 +639,8 @@ rm -f "$OUT" "$LINK" "$ZIP"
 if [ "${KEEP_OLD_IMAGES:-0}" != 1 ]; then
 	for old in "$BUILD"/atari-os-x86-*.img "$BUILD"/atari-os-x86-*-files.zip; do
 		[ -f "$old" ] || continue
+		# only this architecture's images (the 32-bit ones end in -i686)
+		case "$old" in *-i686.img | *-i686-files.zip) [ "$ARCH" = x86 ] || continue ;; *) [ "$ARCH" = x86_64 ] || continue ;; esac
 		log "Removing older $(basename "$old")"
 		rm -f "$old"
 	done

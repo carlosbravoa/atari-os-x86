@@ -43,6 +43,17 @@
   so they are reclaimed at the next boot. A stick pulled while a file is
   being written can still lose that file (fsck.fat reclaims its clusters
   as free space, it does not bring the file back).
+- **32-bit image** (`-i686`): untested on real hardware so far (QEMU only:
+  Atom N270, and the Pentium III model). The kernel has no PAE
+  (`CONFIG_HIGHMEM4G`), so Pentium M "Banias" without PAE boots, at most
+  4 GB of RAM is used and there is no NX protection; userspace needs SSE2
+  (Alpine x86 targets Pentium M: the emulator alone has thousands of SSE2
+  instructions), so a Pentium III or Athlon XP will stop with an illegal
+  instruction; QEMU's pentium3 model runs SSE2 code anyway and cannot show it. On 64-bit UEFI
+  it boots through `BOOTX64.EFI` without EFI runtime services: no reboot
+  straight back into the Atari, no firmware boot entry from the installer.
+  Some x86_64-only drivers (Intel xe, vmd, the Tiger Lake thermal and
+  uncore drivers, AMD SOF audio) do not exist in it.
 - **Lid switch** does nothing yet (volume/brightness keys work).
 - **ZenBook UX425EA reports its battery as absent** (ACPI `BAT0` absent at
   boot), so the menu shows no battery level there. Not investigated.

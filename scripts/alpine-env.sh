@@ -2,13 +2,20 @@
 # alpine-env.sh - unprivileged Alpine build environment for atari-os-x86
 #
 # Everything the appliance ships is built inside an Alpine root filesystem
-# that lives under build/alpine/. No sudo, no Docker: a user namespace
+# that lives under build/alpine/ (build/alpine-x86/ for the 32-bit image,
+# ARCH=x86 or ALPINE_ARCH=x86). No sudo, no Docker: a user namespace
 # (unshare -r) makes us root inside it and bwrap/chroot runs the tools.
 #
 #   scripts/alpine-env.sh bootstrap        download minirootfs, install build deps
 #   scripts/alpine-env.sh run <cmd...>     run a command inside, project at /work
 #   scripts/alpine-env.sh shell            interactive shell inside
 #   scripts/alpine-env.sh pkgs             print the build package list (for CI)
+#
+#   ARCH=x86 scripts/alpine-env.sh bootstrap|run|shell   the same for i686
+#
+# The architecture (ALPINE_ARCH, or ARCH; default x86_64) is passed inside as
+# ARCH, which the build scripts read. For x86 the commands run under
+# "setarch i686", so uname -m and configure scripts see i686.
 #
 # The build scripts (build-emulator.sh, build-fujinet.sh, mkimage.sh) find
 # the project from their own location, so the same scripts also run in a
@@ -22,12 +29,13 @@
 set -eu
 
 ALPINE_BRANCH="${ALPINE_BRANCH:-v3.24}"
-ALPINE_ARCH="${ALPINE_ARCH:-x86_64}"
+ALPINE_ARCH="${ALPINE_ARCH:-${ARCH:-x86_64}}"
 MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$PROJECT/build"
 ROOT="$BUILD/alpine"
+[ "$ALPINE_ARCH" = x86_64 ] || ROOT="$BUILD/alpine-$ALPINE_ARCH"
 DL="$BUILD/downloads"
 
 # Packages for building our own code and assembling the image: the
@@ -52,7 +60,7 @@ in_userns() {
 bootstrap() {
 	mkdir -p "$DL"
 	log "Fetching Alpine $ALPINE_BRANCH release manifest"
-	manifest="$DL/latest-releases.yaml"
+	manifest="$DL/latest-releases-$ALPINE_ARCH.yaml"
 	curl -fsSL "$MIRROR/$ALPINE_BRANCH/releases/$ALPINE_ARCH/latest-releases.yaml" -o "$manifest"
 	# The minirootfs entry: file name and sha256.
 	file=$(awk '/flavor: alpine-minirootfs/{f=1} f&&/file:/{print $2; exit}' "$manifest")
@@ -100,8 +108,10 @@ run_inside() {
 		cp /etc/resolv.conf "$ROOT/etc/resolv.conf"
 		touch "$ROOT/.mounted" # lives on the tmpfs-free root, removed below
 	fi
-	exec_or_run chroot "$ROOT" /usr/bin/env -i \
-		HOME=/root TERM="${TERM:-dumb}" \
+	pers=""; [ "$ALPINE_ARCH" = x86 ] && pers="setarch i686"
+	# shellcheck disable=SC2086
+	exec_or_run $pers chroot "$ROOT" /usr/bin/env -i \
+		HOME=/root TERM="${TERM:-dumb}" ARCH="$ALPINE_ARCH" \
 		PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 		/bin/sh -c 'rm -f /.mounted; cd /work && exec "$@"' sh "$@"
 }

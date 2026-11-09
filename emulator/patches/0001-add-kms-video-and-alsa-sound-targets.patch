@@ -221,6 +221,56 @@ index 55291755..967ed40a 100644
  	fprintf(fp, "TURBO_SPEED=%d\n", Atari800_turbo_speed);
  	fprintf(fp, "ENABLE_SIO_PATCH=%d\n", ESC_enable_sio_patch);
  	fprintf(fp, "ENABLE_SLOW_XEX_LOADING=%d\n", BINLOAD_slow_xex_loading);
+diff --git a/src/ide.c b/src/ide.c
+index 9fcbff88..24cb0272 100644
+--- a/src/ide.c
++++ b/src/ide.c
+@@ -87,6 +87,9 @@
+ #  define PRId64 "lld"
+ #endif
+ 
++/* The 64-bit values below print as %.0f of a double, not PRId64: that is
++   "lld" on 32-bit hosts, which -ansi -pedantic rejects (exact to 2^53). */
++
+ int IDE_enabled = 0, IDE_debug = 0;
+ 
+ struct ide_device device;
+@@ -218,7 +221,7 @@ static int ide_init_drive(struct ide_device *s, char *filename) {
+     s->filesize = ftello(s->file);
+ 
+     if (IDE_debug)
+-        fprintf(stderr, "ide: filesize: %"PRId64"\n", (int64_t)s->filesize);
++        fprintf(stderr, "ide: filesize: %.0f\n", (double)s->filesize);
+ 
+     if (!s->io_buffer) {
+         s->io_buffer_size = SECTOR_SIZE * MAX_MULT_SECTORS;
+@@ -322,7 +325,7 @@ static int64_t ide_get_sector(struct ide_device *s) {
+                       (s->sector - 1);
+ 
+         if (IDE_debug)
+-            fprintf(stderr, "get_sector: large: hcyl %02x  lcyl %02x  heads %02x  sectors %02x  select&f %1x  sector-1 %d  sector_num %"PRId64"\n", s->hcyl, s->lcyl, s->heads, s->sectors, s->select&0x0f, s->sector-1, sector_num);
++            fprintf(stderr, "get_sector: large: hcyl %02x  lcyl %02x  heads %02x  sectors %02x  select&f %1x  sector-1 %d  sector_num %.0f\n", s->hcyl, s->lcyl, s->heads, s->sectors, s->select&0x0f, s->sector-1, (double)sector_num);
+ 
+     }
+     return sector_num;
+@@ -391,7 +394,7 @@ static void ide_sector_read(struct ide_device *s) {
+         ide_transfer_stop(s);
+     } else {
+         if (IDE_debug)
+-            fprintf(stderr, "IDE: read sector=%" PRId64 "\n", sector_num);
++            fprintf(stderr, "IDE: read sector=%.0f\n", (double)sector_num);
+ 
+         if (n > s->req_nb_sectors)
+             n = s->req_nb_sectors;
+@@ -422,7 +425,7 @@ static void ide_sector_write(struct ide_device *s) {
+     sector_num = ide_get_sector(s);
+ 
+     if (IDE_debug)
+-        fprintf(stderr, "IDE: write sector=%" PRId64 "\n", sector_num);
++        fprintf(stderr, "IDE: write sector=%.0f\n", (double)sector_num);
+ 
+     n = s->nsector;
+     if (n > s->req_nb_sectors)
 diff --git a/src/sio.c b/src/sio.c
 index 9a5b7104..53e3edb0 100644
 --- a/src/sio.c
