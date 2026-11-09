@@ -488,8 +488,14 @@ static size_t hardware_lines(const char *status, char *page, size_t size)
 			add_line(page, &n, size, "Input lag: %.0f ms avg, %.0f max (%d)", avg, max, cnt);
 		else
 			add_line(page, &n, size, "Input lag: no input yet");
-		if (KMS_VIDEO_FrameTimes(&emu, &wait))
-			add_line(page, &n, size, "Frame: %.1f ms emu, %.0f ms wait", emu, wait);
+		if (KMS_VIDEO_FrameTimes(&emu, &wait)) {
+			double lead;
+			int late;
+			if (KMS_VIDEO_Jit(&lead, &late)) /* <= 38 columns: whole ms from 10 */
+				add_line(page, &n, size, "Frame: %.1f ms emu, lead %.*f, late %d", emu, lead < 10 ? 1 : 0, lead, late);
+			else
+				add_line(page, &n, size, "Frame: %.1f ms emu, %.0f ms wait", emu, wait);
+		}
 		if (KMS_VIDEO_Wake(&avg, &emu, &max)) /* p50, p99, max */
 			add_line(page, &n, size, "Wake: %.2f ms p50, %.2f p99, %.1f max", avg, emu, max);
 	}

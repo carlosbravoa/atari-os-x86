@@ -125,16 +125,18 @@ static int open_pcm(Sound_setup_t *setup)
 	if ((err = snd_pcm_hw_params_set_rate_near(pcm, hw, &rate, NULL)) < 0)
 		goto fail;
 
-	/* Low latency (F8 > Controls): 10 ms periods, 4 of them (40 ms; with
+	/* Low latency (F8 > Controls): 10 ms periods, 5 of them (50 ms; with
 	   3 QEMU's HDA underran ~20 times a second when the timer paces the
-	   emulation); otherwise the core's 20 ms periods, 4 of them (80 ms). */
+	   emulation, with 4 about once a minute once the just-in-time frame
+	   moved the writes to just before the vblank); otherwise the core's
+	   20 ms periods, 4 of them (80 ms). */
 	if (KMS_SYSMENU_low_latency)
 		period_frames = rate / 100;
 	else
 		period_frames = setup->buffer_frames ? setup->buffer_frames : rate / 50;
 	if ((err = snd_pcm_hw_params_set_period_size_near(pcm, hw, &period_frames, NULL)) < 0)
 		goto fail;
-	buffer_frames = period_frames * 4;
+	buffer_frames = period_frames * (KMS_SYSMENU_low_latency ? 5 : 4);
 	if ((err = snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &buffer_frames)) < 0)
 		goto fail;
 	if ((err = snd_pcm_hw_params(pcm, hw)) < 0)

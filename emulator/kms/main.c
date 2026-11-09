@@ -158,13 +158,15 @@ int main(int argc, char **argv)
 		}
 #endif
 		KMS_SYSMENU_LatencyPoll();
-		/* Low latency: the previous frame's flip lands first, then the
-		   input is read and this frame emulated and queued at once, so it
-		   is shown one vblank later (otherwise the frame sleep inside
-		   Atari800_Frame waits, with the input already read). */
+		/* The previous frame's flip lands first, then the input is read and
+		   this frame emulated and queued at once, so it is shown one vblank
+		   later (otherwise the frame sleep inside Atari800_Frame waits with
+		   the input already read, and the picture misses a vblank). In Low
+		   latency the wait also sleeps on until just before the next vblank
+		   (the just-in-time frame, kms/video.c). A no-op unless paced by
+		   the display. */
 		t0 = Util_time();
-		if (KMS_SYSMENU_low_latency)
-			KMS_VIDEO_WaitFrame();
+		KMS_VIDEO_WaitFrame();
 		INPUT_key_code = PLATFORM_Keyboard();
 		input_t = KMS_INPUT_TakeEventTime();
 		if (KMS_SYSMENU_requested) {

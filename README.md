@@ -426,19 +426,39 @@ waits for (median, 99th percentile and worst of the last 600: tens of
 microseconds mean a real-time kernel would buy nothing). With `-kms-debug`
 (the debug boot entry) the log gets the same every 5 s, plus the sound
 card's underruns. What is not in the number: the USB polling before the
-kernel sees the event (1 ms now, see below) and the panel's own scan-out
-and response time.
+kernel sees the event (1 ms now, see below), the game's own delay from
+reading the stick to drawing, and the panel's own scan-out and response
+time.
+
+When the display paces the emulation (a 60 Hz panel with NTSC, see TV
+system) every frame waits for the previous frame's vblank first, then
+reads the input, emulates and queues its flip, so it is on screen at the
+next vblank. What to expect at 60 Hz (one frame is 16.7 ms; an input
+arrives anywhere within a frame, half a frame on average):
+
+| Mode | Input lag avg | max |
+|---|---|---|
+| Normal | about 1.5 frames, 25 ms | 33 ms |
+| Low latency | half a frame + the lead, about 11 ms | about 20 ms |
 
 **Low latency** (F8 > Controls, off by default: an opt-in, since it keeps the CPU in its fast power mode; `KMS_LOW_LATENCY`):
 
-- each frame waits for the previous frame's vblank first, then reads the
-  input, emulates and queues its flip, so it is on screen one vblank later
-  (otherwise the input is read, the frame emulated, then it waits: one
-  frame older). Only when the display paces the emulation (a 60 Hz panel
-  with NTSC, see TV system)
-- the sound card runs 10 ms periods, four of them (40 ms) instead of
+- the just-in-time frame: after the vblank the emulator sleeps on until
+  shortly before the next one (the lead: the time a frame takes to
+  emulate and draw, 95th percentile, plus 1 ms, at least 2 ms), only then
+  reads the input, emulates and flips. The Hardware page's Frame line
+  then reads `Frame: 0.8 ms emu, lead 3.0, late 0`: `late` counts the
+  frames among the last 120 that missed their vblank (each shows as one
+  repeated picture; the lead grows by 1 ms after each). More than a
+  handful a minute means the machine cannot keep up: switch Low latency
+  off or the TV look to Crisp. When two frames in a row take longer than
+  a vblank it switches itself off until the display settings change
+  (`kms: jit off` in the log). `KMS_JIT=0` in the emulator's config file
+  turns it off for a comparison (Low latency then reads right after the
+  vblank, as Normal does)
+- the sound card runs 10 ms periods, five of them (50 ms) instead of
   20 ms x 4 (80 ms): sound follows the picture closer (30 ms underran in
-  QEMU)
+  QEMU, 40 ms about once a minute with the just-in-time frame)
 - the emulator's main thread runs `SCHED_FIFO` (priority 10, not in turbo)
   with its memory locked and 50 us timer slack, so a busy system does not
   make it late (the log says `sched: fifo 10, timerslack 50us, mlockall

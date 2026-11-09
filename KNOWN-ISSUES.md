@@ -24,7 +24,11 @@
   time stamp of the event to the vblank the frame was flipped on. Not in
   them: the USB poll interval before the event (1 ms with the new kernel
   options, the device's own scan time unknown) and the panel's scan-out
-  and pixel response time (often 5-15 ms more on laptop panels). With
+  and pixel response time (often 5-15 ms more on laptop panels), and the
+  game's own delay from reading the stick to drawing the result (often a
+  frame or two, the program's choice). Low latency's just-in-time frame
+  can miss a vblank when a frame takes longer than its lead: it shows as
+  one repeated picture (counted as `late` on the Hardware page). With
   Low latency on, the CPU runs at full performance preference and the
   fan may be heard more; switch it off in F8 > Controls. In QEMU the
   numbers are indicative only (no real panel). The display waits only

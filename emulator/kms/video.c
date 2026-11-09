@@ -173,6 +173,7 @@ static double fr_emu[LAT_RING], fr_wait[LAT_RING];
 static int fr_n = 0, fr_pos = 0;
 static double frame_waited = 0; /* seconds slept or waited this frame */
 static int frame_paced = FALSE; /* the vblank wait came first (KMS_VIDEO_WaitFrame) */
+static int frame_vbl = FALSE;   /* ... the same, until FrameDone */
 static double st_lat_last = 0;
 /* Wake-up error (scheduling jitter): how late a timed sleep returned past
    its request, or how long after the flip's vblank stamp the loop ran
@@ -181,6 +182,33 @@ static double st_lat_last = 0;
 static double wake_ring[WAKE_RING];
 static int wake_n = 0, wake_pos = 0;
 static double last_flip_ts = 0; /* vblank stamp of the last flip event */
+
+/* Just-in-time frame (Low latency, KMS_JIT): after the vblank the loop
+   sleeps until LEAD before the next one, then reads the input, emulates,
+   renders and flips. LEAD = p95 of the emulate + render time plus a
+   margin, plus ADAPT, which grows on every late frame (its flip missed the
+   next vblank) and shrinks after a long run of frames on time. Two frames
+   longer than a period in a row: off until the display settings change or
+   Low latency is switched (today's loop, read right after the vblank). */
+int KMS_VIDEO_jit = TRUE;
+#define PER_RING 60
+static double per_ring[PER_RING]; /* measured vblank periods (s) */
+static int per_n = 0, per_pos = 0;
+static int jit_armed = FALSE;  /* the frame being built slept for the JIT target */
+static int frame_jit = FALSE;  /* ... the same, for FrameDone */
+static int flip_jit = FALSE;   /* the flip in flight is a JIT frame's */
+static int jit_off = FALSE;    /* gave up: the machine is too slow for the mode */
+static int jit_slow = 0;       /* consecutive JIT frames longer than a period */
+static double jit_adapt = 0;   /* s, added to the lead after late frames */
+static int jit_ontime = 0;     /* JIT flips on time in a row */
+static double jit_lead_last = 0; /* s, the lead used last */
+static int jit_ll_seen = -1;   /* Low latency as last seen (a toggle resets) */
+static unsigned char late_ring[LAT_RING]; /* the last JIT flips: 1 = late */
+static int late_n = 0, late_pos = 0;
+static unsigned long st_late = 0;
+
+static int cmp_double(const void *a, const void *b);
+static double jit_period(void);
 
 static void wake_sample(double late)
 {
@@ -564,11 +592,22 @@ static void blend_map(int x, int n, int m, int sharp, int *idx, int *wgt)
 	*wgt = (int)(f * 256 + 0.5);
 }
 
+static void jit_reset(void)
+{
+	jit_off = FALSE;
+	jit_slow = 0;
+	jit_adapt = 0;
+	jit_ontime = 0;
+	late_n = late_pos = 0;
+}
+
 static void compute_layout(void)
 {
 	int W = mode.hdisplay, H = mode.vdisplay;
 	int sw, sh, x, y, i, run = 0;
 	int src_w, smooth;
+
+	jit_reset(); /* the render time changes with the picture */
 
 	switch (KMS_VIDEO_borders) {
 	case KMS_BORDERS_FULL:
@@ -831,6 +870,7 @@ void KMS_VIDEO_SetNtscSharpness(double s)
 	if (s > FILTER_NTSC_SHARPNESS_MAX) s = FILTER_NTSC_SHARPNESS_MAX;
 	FILTER_NTSC_setup.sharpness = s;
 	ntsc_refilter();
+	jit_reset();
 #else
 	(void)s;
 #endif
@@ -949,6 +989,12 @@ int KMS_VIDEO_ReadConfig(char *option, char *parameters)
 		Util_strlcpy(KMS_VIDEO_device, parameters, sizeof KMS_VIDEO_device);
 	else if (strcmp(option, "KMS_MODE") == 0)
 		Util_strlcpy(KMS_VIDEO_mode_request, parameters, sizeof KMS_VIDEO_mode_request);
+	else if (strcmp(option, "KMS_JIT") == 0) {
+		int v = Util_sscanbool(parameters);
+		if (v == -1)
+			return FALSE;
+		KMS_VIDEO_jit = v;
+	}
 	else
 		return FALSE;
 	return TRUE;
@@ -969,6 +1015,8 @@ void KMS_VIDEO_WriteConfig(FILE *fp)
 		fprintf(fp, "KMS_DEVICE=%s\n", KMS_VIDEO_device);
 	if (KMS_VIDEO_mode_request[0])
 		fprintf(fp, "KMS_MODE=%s\n", KMS_VIDEO_mode_request);
+	if (!KMS_VIDEO_jit) /* a debugging switch: only written when off */
+		fprintf(fp, "KMS_JIT=0\n");
 }
 
 int KMS_VIDEO_Initialise(int *argc, char *argv[])
@@ -1330,18 +1378,52 @@ static double clock_now(void)
 /* FRAME is the vblank sequence the flip landed on: a gap of more than one
    since the previous flip means the panel showed a picture again (judder
    when the Atari and the panel run at different rates). */
+static void jit_flip_done(unsigned int gap)
+{
+	int late = gap >= 2 && gap < 120;
+	late_ring[late_pos] = (unsigned char)late;
+	late_pos = (late_pos + 1) % LAT_RING;
+	if (late_n < LAT_RING)
+		late_n++;
+	if (late) {
+		st_late++;
+		jit_adapt += 0.001;
+		jit_ontime = 0;
+	}
+	else if (++jit_ontime >= 600) {
+		jit_ontime = 0;
+		jit_adapt -= 0.0005;
+		if (jit_adapt < 0)
+			jit_adapt = 0;
+	}
+}
+
 static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void *data)
 {
+	double ts = (double)sec + (double)usec / 1e6, prev_ts = last_flip_ts;
+	unsigned int gap = 0; /* vblanks since the previous flip, 0 = unknown */
 	(void)fd; (void)data;
 	flip_pending = 0;
-	last_flip_ts = (double)sec + (double)usec / 1e6;
+	last_flip_ts = ts;
 	if (flip_input_ts > 0)
-		lat_sample((double)sec + (double)usec / 1e6);
-	if (frame != 0 && have_seq) {
-		unsigned int gap = frame - last_seq;
-		if (gap > 1 && gap < 120) /* longer: a pause (menu), not judder */
-			st_repeats += gap - 1;
+		lat_sample(ts);
+	/* Without sequence numbers (bochs-drm, simpledrm) the flip events
+	   come when the flip is queued, not at a vblank: nothing to count. */
+	if (frame != 0 && have_seq)
+		gap = frame - last_seq;
+	if (gap > 1 && gap < 120) /* longer: a pause (menu), not judder */
+		st_repeats += gap - 1;
+	if (gap >= 1 && gap <= 4 && prev_ts > 0 && ts > prev_ts) {
+		per_ring[per_pos] = (ts - prev_ts) / gap;
+		per_pos = (per_pos + 1) % PER_RING;
+		if (per_n < PER_RING)
+			per_n++;
 	}
+	/* the pacing never plans a repeat (one Atari frame per vblank while
+	   locked): a gap after a JIT frame is that frame missing its vblank */
+	if (flip_jit)
+		jit_flip_done(gap);
+	flip_jit = FALSE;
 	last_seq = frame;
 	have_seq = frame != 0;
 }
@@ -1387,14 +1469,18 @@ static int flip_wait_for(double max_s)
 	return done;
 }
 
-static void wait_flip(void)
+/* FALSE when the flip got stuck and was given up. */
+static int wait_flip(void)
 {
 	if (flip_pending && !flip_wait_for(0.1)) { /* a stuck flip must not hang the emulator */
 		flip_pending = 0;
 		have_seq = FALSE;
 		st_timeouts++;
 		flip_input_ts = 0;
+		flip_jit = FALSE;
+		return FALSE;
 	}
+	return TRUE;
 }
 
 /* Util_sleep() ends up here (SUPPORTS_PLATFORM_SLEEP). Paced by the
@@ -1413,6 +1499,16 @@ void PLATFORM_Sleep(double s)
 		flip_wait_for(s);
 		return;
 	}
+	if (frame_vbl && drm_fd >= 0 && locked_now()) {
+		/* Inside a frame that started at a vblank: the sound buffer is
+		   full (paced by a panel at 60.0x Hz the Atari makes its 59.92 Hz
+		   worth of samples a little too fast). Sleep only until shortly
+		   before the next vblank, so the picture is not repeated; with
+		   no time left, the full sleep (the picture repeats once). */
+		double left = last_flip_ts + jit_period() - 0.002 - clock_now();
+		if (left > 0.0005 && left < s)
+			s = left;
+	}
 	ts.tv_sec = (time_t)s;
 	ts.tv_nsec = (long)((s - (double)ts.tv_sec) * 1e9);
 	t0 = Util_time();
@@ -1428,13 +1524,101 @@ void PLATFORM_Sleep(double s)
    the input is read, so the frame emulated next starts from fresh input
    right after a vblank. atari800's frame sleep then has nothing left to
    wait for (KMS_VIDEO_TakeFramePaced). */
+/* JIT applies: Low latency on, the switch on, not given up, paced by the
+   display's page flips (not in turbo or a menu). */
+static int jit_wanted(void)
+{
+	if (jit_ll_seen != KMS_SYSMENU_low_latency) {
+		jit_ll_seen = KMS_SYSMENU_low_latency;
+		jit_reset();
+	}
+	return KMS_SYSMENU_low_latency && KMS_VIDEO_jit && !jit_off && flip_supported && locked_now();
+}
+
+/* One vblank period (s): the measured mean when it agrees with the mode's
+   within 2%, else the mode's. */
+static double jit_period(void)
+{
+	double mode_p = KMS_VIDEO_refresh > 0 ? 1.0 / KMS_VIDEO_refresh : 1.0 / 60.0, sum = 0;
+	int i;
+	if (per_n < 10)
+		return mode_p;
+	for (i = 0; i < per_n; i++)
+		sum += per_ring[i];
+	sum /= per_n;
+	return sum > mode_p * 0.98 && sum < mode_p * 1.02 ? sum : mode_p;
+}
+
+/* The lead (s) before the vblank at which the frame starts. */
+static double jit_lead(double period)
+{
+	static double sorted[LAT_RING];
+	double p95 = 0, lead;
+	int n = fr_n;
+	if (n > 0) {
+		memcpy(sorted, fr_emu, sizeof sorted[0] * (size_t)n);
+		qsort(sorted, (size_t)n, sizeof sorted[0], cmp_double);
+		p95 = sorted[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1];
+	}
+	lead = p95 + 0.001;
+	if (lead < 0.002)
+		lead = 0.002;
+	lead += jit_adapt;
+	if (lead > period - 0.001) /* the most: read right after the vblank */
+		lead = period - 0.001;
+	return lead;
+}
+
+/* Sleep until LEAD before the vblank after the one that just ended. */
+static void jit_sleep(void)
+{
+	double period = jit_period(), lead = jit_lead(period);
+	double target = last_flip_ts + period - lead, now = clock_now(), t0;
+	struct timespec ts;
+	jit_lead_last = lead;
+	jit_armed = frame_jit = TRUE;
+	if (target <= now || target - now > period) /* no time left, or a stale stamp */
+		return;
+	ts.tv_sec = (time_t)target;
+	ts.tv_nsec = (long)((target - (double)ts.tv_sec) * 1e9);
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000000L;
+	}
+	t0 = Util_time();
+	while (clock_nanosleep(lat_clock, TIMER_ABSTIME, &ts, NULL) == EINTR)
+		;
+	frame_waited += Util_time() - t0;
+	wake_sample(clock_now() - target);
+}
+
 void KMS_VIDEO_WaitFrame(void)
 {
+	int jit;
 	frame_paced = FALSE;
+	jit_armed = frame_jit = FALSE;
+	jit = jit_wanted();
 	if (drm_fd < 0 || !flip_pending || !locked_now())
 		return;
-	wait_flip();
-	frame_paced = TRUE;
+	if (!wait_flip())
+		return;
+	frame_paced = frame_vbl = TRUE;
+	if (jit && last_flip_ts > 0)
+		jit_sleep();
+}
+
+int KMS_VIDEO_Jit(double *lead_ms, int *late)
+{
+	int i, n = 0;
+	*lead_ms = 0;
+	*late = 0;
+	if (!(KMS_SYSMENU_low_latency && KMS_VIDEO_jit && !jit_off && !Atari800_turbo && KMS_VIDEO_PacingLocked()))
+		return FALSE;
+	for (i = 0; i < late_n; i++)
+		n += late_ring[i];
+	*lead_ms = (jit_lead_last > 0 ? jit_lead_last : jit_lead(jit_period())) * 1000.0;
+	*late = n;
+	return TRUE;
 }
 
 int KMS_VIDEO_TakeFramePaced(void)
@@ -1453,12 +1637,25 @@ void KMS_VIDEO_FrameInput(double t)
 void KMS_VIDEO_FrameDone(double total, int valid)
 {
 	double wait = frame_waited;
+	int was_jit = frame_jit;
 	frame_waited = 0;
-	frame_paced = FALSE;
+	frame_paced = frame_vbl = FALSE;
+	frame_jit = FALSE;
 	if (!valid)
 		return;
 	if (wait > total)
 		wait = total;
+	if (was_jit) {
+		double period = jit_period();
+		if (total - wait > period) {
+			if (++jit_slow >= 2 && !jit_off) {
+				jit_off = TRUE;
+				Log_print("kms: jit off, frame %.1f ms > period", (total - wait) * 1000.0);
+			}
+		}
+		else
+			jit_slow = 0;
+	}
 	fr_emu[fr_pos] = total - wait;
 	fr_wait[fr_pos] = wait;
 	fr_pos = (fr_pos + 1) % LAT_RING;
@@ -1553,10 +1750,17 @@ void KMS_VIDEO_DisplayScreen(void)
 	if (debug_stats) {
 		double now = Util_time();
 		if (now - st_last >= 5.0) {
-			Log_print("kms: %.1f fps, flips %lu, repeats %lu, timeouts %lu, busy %lu, pacing %s, render %.2f ms",
+			char jit[48];
+			double lead_ms;
+			int late;
+			if (KMS_VIDEO_Jit(&lead_ms, &late))
+				snprintf(jit, sizeof jit, "jit lead %.1f ms, late %lu", lead_ms, st_late);
+			else
+				snprintf(jit, sizeof jit, "jit off");
+			Log_print("kms: %.1f fps, flips %lu, repeats %lu, timeouts %lu, busy %lu, pacing %s, %s, render %.2f ms",
 			          st_frames / (now - st_last), st_flips, st_repeats, st_timeouts, st_busy,
-			          locked_now() ? "display" : "timer", st_frames ? st_render * 1000.0 / st_frames : 0.0);
-			st_frames = st_flips = st_repeats = st_timeouts = st_busy = 0;
+			          locked_now() ? "display" : "timer", jit, st_frames ? st_render * 1000.0 / st_frames : 0.0);
+			st_frames = st_flips = st_repeats = st_timeouts = st_busy = st_late = 0;
 			st_render = 0;
 			st_last = now;
 		}
@@ -1569,6 +1773,8 @@ void KMS_VIDEO_DisplayScreen(void)
 			st_flips++;
 			flip_input_ts = frame_input_ts;
 			frame_input_ts = 0;
+			flip_jit = jit_armed && locked_now();
+			jit_armed = FALSE;
 			return;
 		}
 		if (errno == EBUSY) {
@@ -1583,6 +1789,8 @@ void KMS_VIDEO_DisplayScreen(void)
 					st_flips++;
 					flip_input_ts = frame_input_ts;
 					frame_input_ts = 0;
+					flip_jit = jit_armed && locked_now();
+					jit_armed = FALSE;
 					return;
 				}
 				flip_pending = 0;

@@ -102,8 +102,9 @@ int KMS_VIDEO_PacingLocked(void);
 int KMS_VIDEO_HasModeFor(double fps);
 
 /* Input lag, controller to display (kms/main.c drives it, once a frame):
-   - WaitFrame (Low latency only): wait for the previous frame's flip now,
-     before the input is read; TakeFramePaced is TRUE once after that (the
+   - WaitFrame: wait for the previous frame's flip now, before the input
+     is read (Low latency: then sleep on until just before the next vblank,
+     the just-in-time frame); TakeFramePaced is TRUE once after that (the
      frame sleep in atari800's Atari800_Sync has nothing left to wait for).
    - FrameInput(t): the kernel stamp of the oldest input this frame used
      (KMS_INPUT_TakeEventTime); the sample is the flip's vblank stamp minus
@@ -125,5 +126,10 @@ int KMS_VIDEO_FrameTimes(double *emu_ms, double *wait_ms);
    each how late a timed sleep returned, or how long after a flip's vblank
    the loop waiting for it ran again. FALSE while there is none. */
 int KMS_VIDEO_Wake(double *p50_ms, double *p99_ms, double *max_ms);
+/* Just-in-time frame (KMS_JIT, default 1; applies in Low latency): TRUE
+   when it is in use, with the current lead (ms) and the late frames (a
+   flip that missed its vblank) among the last 120. */
+extern int KMS_VIDEO_jit;
+int KMS_VIDEO_Jit(double *lead_ms, int *late);
 
 #endif /* KMS_KMS_KMS_VIDEO_H_ */
