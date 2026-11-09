@@ -162,3 +162,43 @@ updated; do not touch the Normal-mode buffer.
 On the ZenBook (Claude after deploy, Carlos later): the Normal-mode
 `Input lag` should read ~25 ms, Low latency ~11 ms, with `late` staying
 at 0 while playing; sound without clicks in both modes.
+
+## Findings on the ZenBook (Claude, 2026-11-09, after the deploy)
+
+Carlos's first Hardware photo in Low latency read `Input lag: 21 ms avg,
+32 max`, `Frame: 0.5 ms emu, lead 13, late 0`: half a frame plus the lead,
+exactly as designed, with the lead six times what the frame needed. The
+`-kms-debug` log (switched on through `atari/config/atari800.args`) showed
+one late frame every 10 to 20 s even idle at BASIC, each adding 1 ms to
+the lead, the decay too slow to matter. Logging each late frame's raw
+times (`kms: jit late: ... from prev vblank (ms): event, target, wake,
+submit, this`) gave two patterns with one cause: frames queued 8 ms after
+their vblank (a 10 ms sleep inside the frame) and frames 0.5 ms longer
+than usual queued 0.9 ms before the vblank timestamp and still missed.
+Both were the sound core's "buffer full" sleep (`Sound_Update`): paced by
+the display the Atari makes 59.92 Hz worth of samples per frame at 60.008
+frames a second, the device buffer overfills every 10 to 20 s, and the
+core sleeps a period (the `PLATFORM_Sleep` cap of part B turned that into
+the 0.5 ms variant). `Sound_AdjustSpeed` cannot help: paced frames skip
+`Atari800_Sync`. No SMIs (MSR 0x34 constant), i915 FBC not compressing.
+
+Changes, made directly (small, and Carlos was waiting at the laptop):
+
+- `emulator/sound_alsa.c`: dynamic rate control. The fill is read once per
+  frame before the frame's samples go in (its lowest point); the target
+  is one period plus one frame below full; the output is resampled
+  (linear interpolation, S16, 1 or 2 channels) by a ratio within +-0.5 %
+  that follows the fill, smoothed over ~10 frames; `PLATFORM_SoundAvailable`
+  reports the space in input frames. Result: no overflow sleep, 0
+  underruns in 4 minutes (the first, wrongly signed attempt gave 4).
+- `emulator/kms/video.c`: the lead adds the vblank's length (the flip
+  timestamp is the end of the vblank, the flip must be queued before its
+  start: 0.77 ms on the ZenBook's 1132-line mode) and 1.5 ms instead of
+  1 ms; the ratchet steps 0.5 ms, caps at 4 ms and decays one step per
+  30 s; `late` on the Hardware page counts since the last reset; a
+  rate-limited `kms: jit late:` line with the raw times stays in.
+
+Measured after the changes, idle at BASIC: `jit lead 3.3 ms, late 0` over
+3 minutes, no underruns. Expected while playing: `Input lag` about 11-12
+ms avg, max about 20, `late` staying at 0 or growing by one every few
+minutes at most.

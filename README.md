@@ -466,13 +466,16 @@ arrives anywhere within a frame, half a frame on average):
 
 - the just-in-time frame: after the vblank the emulator sleeps on until
   shortly before the next one (the lead: the time a frame takes to
-  emulate and draw, 95th percentile, plus 1 ms, at least 2 ms), only then
-  reads the input, emulates and flips. The Hardware page's Frame line
-  then reads `Frame: 0.8 ms emu, lead 3.0, late 0`: `late` counts the
-  frames among the last 120 that missed their vblank (each shows as one
-  repeated picture; the lead grows by 1 ms after each). More than a
-  handful a minute means the machine cannot keep up: switch Low latency
-  off or the TV look to Crisp. When two frames in a row take longer than
+  emulate and draw, 95th percentile, plus the vblank's own length and
+  1.5 ms, at least 2 ms; about 3 ms on a laptop panel), only then reads
+  the input, emulates and flips. The Hardware page's Frame line then
+  reads `Frame: 0.8 ms emu, lead 3.0, late 0`: `late` counts the frames
+  that missed their vblank since Low latency went on (each shows as one
+  repeated picture; the lead grows by 0.5 ms after each, up to 4 ms, and
+  gives a step back after 30 s without one). One every few minutes is
+  normal; several a minute means the machine cannot keep up: switch Low
+  latency off or the TV look to Crisp. With `-kms-debug` each one logs
+  where its time went (`kms: jit late: ...`). When two frames in a row take longer than
   a vblank it switches itself off until the display settings change
   (`kms: jit off` in the log). `KMS_JIT=0` in the emulator's config file
   turns it off for a comparison (Low latency then reads right after the
@@ -480,6 +483,11 @@ arrives anywhere within a frame, half a frame on average):
 - the sound card runs 10 ms periods, five of them (50 ms) instead of
   20 ms x 4 (80 ms): sound follows the picture closer (30 ms underran in
   QEMU, 40 ms about once a minute with the just-in-time frame)
+- in both modes, when the display paces the emulation the sound is
+  resampled by up to 0.5 % to follow the panel's rate (the Atari makes
+  59.92 Hz worth of samples per frame at the panel's 60.0x frames a
+  second); without it the buffer overfilled every 10 to 20 s and the
+  core paused inside a frame
 - the emulator's main thread runs `SCHED_FIFO` (priority 10, not in turbo)
   with its memory locked and 50 us timer slack, so a busy system does not
   make it late (the log says `sched: fifo 10, timerslack 50us, mlockall

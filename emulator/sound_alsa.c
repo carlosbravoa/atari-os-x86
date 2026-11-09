@@ -21,6 +21,7 @@
 #include "config.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <alsa/asoundlib.h>
 
@@ -36,6 +37,23 @@ static snd_pcm_uframes_t period_frames = 0;
 static snd_pcm_uframes_t buffer_frames = 0;
 static int can_pause = 0;
 static unsigned int underruns = 0;
+
+/* Dynamic rate control. Paced by the display the Atari runs at the panel's
+   rate (60.008 Hz on a typical laptop) but makes 59.92 Hz worth of samples
+   per frame, so the device buffer slowly overfills; the core's answer
+   (Sound_Update) is to sleep for a whole period inside the frame, which a
+   just-in-time frame cannot afford (it misses its vblank, kms/video.c).
+   Instead the samples are resampled on the way out by a ratio that
+   follows the fill level: at most +-0.5 % (a tenth of a semitone), so
+   the fill settles where the rates match and the core never waits. */
+#define DRC_MAX 0.005
+static double drc_ratio = 1.0;   /* output frames per input frame */
+static double drc_pos = 0.0;     /* input position of the next output frame */
+static short drc_last[2];        /* the input frame before the current chunk */
+static int drc_on = 0;           /* S16, 1 or 2 channels */
+static short *drc_buf = NULL;
+static unsigned int drc_buf_frames = 0;
+static unsigned int pcm_rate = 44100;
 
 /* Card selection: laptops often have the HDMI codec as card 0 and the
    analogue one (speakers, headphones) as card 1, so "default" would be
@@ -157,6 +175,11 @@ static int open_pcm(Sound_setup_t *setup)
 	setup->sample_size = fmt == SND_PCM_FORMAT_S16 ? 2 : 1;
 	setup->buffer_frames = (unsigned int)period_frames;
 	frame_bytes = setup->channels * setup->sample_size;
+	drc_on = setup->sample_size == 2 && channels <= 2;
+	pcm_rate = rate;
+	drc_ratio = 1.0;
+	drc_pos = 0.0;
+	drc_last[0] = drc_last[1] = 0;
 
 	(void)i;
 	Log_print("alsa: %s, %u Hz, %u ch, %u-bit, period %lu, buffer %lu frames (%.0f ms%s)",
@@ -349,20 +372,36 @@ unsigned int PLATFORM_SoundAvailable(void)
 		if (avail < 0)
 			return 0;
 	}
-	/* Keep one period of headroom so a late frame does not underrun;
-	   the core's Sound_AdjustSpeed keeps the fill level steady. */
 	if ((snd_pcm_uframes_t)avail > buffer_frames)
 		avail = buffer_frames;
+	if (drc_on) {
+		/* The fill is read once per frame, just before the frame's samples
+		   go in, so it is at its lowest. Aim one period plus one frame
+		   below full: the frame's samples then always fit (the core never
+		   holds any back) and a late frame still finds a period queued.
+		   Too full: fewer output frames per input frame, so the input is
+		   used up faster. Proportional over one period, smoothed. */
+		double span = (double)period_frames;
+		double target = (double)buffer_frames - span - (double)pcm_rate / 50.0;
+		double fill = (double)buffer_frames - (double)avail;
+		double want = 1.0 - DRC_MAX * (fill - target) / span;
+		if (want > 1.0 + DRC_MAX)
+			want = 1.0 + DRC_MAX;
+		else if (want < 1.0 - DRC_MAX)
+			want = 1.0 - DRC_MAX;
+		drc_ratio += 0.1 * (want - drc_ratio);
+		/* in input frames: what fits once resampled */
+		avail = (snd_pcm_sframes_t)((double)avail / drc_ratio);
+	}
 	return (unsigned int)avail * frame_bytes;
 }
 
-void PLATFORM_SoundWrite(UBYTE const *buffer, unsigned int size)
+/* Write FRAMES frames of BUF to the device; stops at EAGAIN like before. */
+static void write_frames(const void *buf, snd_pcm_uframes_t frames)
 {
-	snd_pcm_uframes_t frames = size / frame_bytes;
-	if (!pcm)
-		return;
+	const unsigned char *p = buf;
 	while (frames > 0) {
-		snd_pcm_sframes_t n = snd_pcm_writei(pcm, buffer, frames);
+		snd_pcm_sframes_t n = snd_pcm_writei(pcm, p, frames);
 		if (n < 0) {
 			if (n == -EAGAIN)
 				return;
@@ -370,7 +409,50 @@ void PLATFORM_SoundWrite(UBYTE const *buffer, unsigned int size)
 				return;
 			continue;
 		}
-		buffer += n * frame_bytes;
+		p += n * frame_bytes;
 		frames -= n;
 	}
+}
+
+void PLATFORM_SoundWrite(UBYTE const *buffer, unsigned int size)
+{
+	unsigned int n_in = size / frame_bytes, n_out = 0, ch, i;
+	const short *in = (const short *)buffer;
+	double step;
+	if (!pcm || n_in == 0)
+		return;
+	if (!drc_on || (drc_ratio > 0.99999 && drc_ratio < 1.00001)) {
+		drc_pos = 0.0;
+		write_frames(buffer, n_in);
+		return;
+	}
+	ch = frame_bytes / 2;
+	step = 1.0 / drc_ratio;
+	if (drc_buf_frames < n_in + n_in / 50 + 4) {
+		free(drc_buf);
+		drc_buf_frames = n_in + n_in / 50 + 4;
+		drc_buf = malloc((size_t)drc_buf_frames * ch * sizeof(short));
+		if (!drc_buf) {
+			drc_buf_frames = 0;
+			drc_on = 0;
+			write_frames(buffer, n_in);
+			return;
+		}
+	}
+	/* linear interpolation between the frame before pos and the one at it */
+	while (drc_pos < (double)n_in && n_out < drc_buf_frames) {
+		unsigned int k = (unsigned int)drc_pos;
+		double frac = drc_pos - (double)k;
+		for (i = 0; i < ch; i++) {
+			double a = k == 0 ? drc_last[i] : in[(k - 1) * ch + i];
+			double b = in[k * ch + i];
+			drc_buf[n_out * ch + i] = (short)(a + (b - a) * frac);
+		}
+		n_out++;
+		drc_pos += step;
+	}
+	drc_pos -= (double)n_in;
+	for (i = 0; i < ch; i++)
+		drc_last[i] = in[(n_in - 1) * ch + i];
+	write_frames(drc_buf, n_out);
 }
