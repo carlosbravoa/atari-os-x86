@@ -4,7 +4,7 @@ All notable changes to atari-os-x86. Versions are git tags (`v0.1.0`); the
 image, the boot splash, the System menu's hardware page and init's `status`
 reply all show the version they were built from.
 
-## Unreleased
+## v0.1.0 (2026-11-08)
 
 - Boots x86_64 PCs and laptops straight into atari800 from one FAT32 USB stick, BIOS and UEFI (Limine)
 - Own PID 1 (`init/init.c`): driver loading by modalias without udev, modloop with the full module and firmware set, hotplug via uevents
