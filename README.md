@@ -26,7 +26,7 @@ erases the stick. Pick one:
   the stick back to verify it:
 
   ```sh
-  bash flash.sh atari-os-x86-v0.1.0.img.xz
+  bash flash.sh atari-os-x86-v0.2.0.img.xz
   ```
 
   `--dry-run` shows the disks and the plan without writing; `--help` for
@@ -835,10 +835,12 @@ release in one evdev read, so the input layer keeps a tap alive for one frame.
 
 Runs on real laptops. Verified on an ASUS ZenBook UX425EA (Tiger Lake):
 boot to emulator in 5.6 s, i915 at 1920x1080 with a 4x picture, SOF audio,
-Wi-Fi from the System menu, SSH, volume/brightness keys, clock sync.
-QEMU-verified: BIOS and UEFI, BASIC and FujiNet CONFIG boots, TNFS over
-the internet, DHCP, power button, the lid (screen off and pause). Next:
-the media browser, suspend, the Altirra core, i686 netbooks; see KNOWN-ISSUES.md.
+Wi-Fi from the System menu, SSH, volume/brightness keys, clock sync, the
+Library, input lag of 12 ms average in Low latency (25 ms in Normal), the
+lid (screen off and pause). QEMU-verified: BIOS, UEFI and 32-bit UEFI,
+BASIC and FujiNet CONFIG boots, TNFS over the internet, DHCP, power
+button, the i686 image. Next: suspend, the Altirra core, the i686 image
+and non-Intel Wi-Fi on real machines; see KNOWN-ISSUES.md.
 
 ## Licence
 
