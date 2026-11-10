@@ -28,8 +28,10 @@ Pick one (the stick is erased):
   `.img` onto your Ventoy stick like any other image.
 
 Machines without a 64-bit CPU (Core Duo, Pentium M, Atom N270 netbooks)
-need the experimental 32-bit image, `atari-os-x86-@TAG@-i686.img`, written
-the same way; the release workflow does not build it yet (README, "32-bit
+need the experimental 32-bit image, `atari-os-x86-@TAG@-i686.img.xz`,
+written the same way (its stick files: `atari-os-x86-@TAG@-i686-files.zip`).
+It is tested in QEMU only, not yet on a real machine: if you try it, please
+open an issue saying which laptop and what happened (README, "32-bit
 machines").
 
 `SHA256SUMS` has the checksums (`sha256sum -c SHA256SUMS`).
@@ -62,7 +64,7 @@ menu (Wi-Fi, boot into BASIC/ASH/FujiNet, shut down), **F9** the Library.
 
 ### Hardware
 
-- 64-bit x86 (x86_64) PC or laptop; 32-bit-only machines: the experimental i686 image (not attached yet)
+- 64-bit x86 (x86_64) PC or laptop; 32-bit-only machines (Core Duo, Pentium M, Atom N270): the experimental i686 image, untested on real hardware
 - BIOS or UEFI boot; on UEFI, Secure Boot must be off
 - 1 GB RAM (what it is tested with)
 - a USB stick or SD card of 1 GB or more

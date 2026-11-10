@@ -1,5 +1,6 @@
-# Build the image in Alpine, compile-check the C code against the host,
-# and boot the image in QEMU (BIOS and UEFI). release.yml runs this same
+# Build the image in Alpine (x86_64, and the 32-bit i686 image in a 32-bit
+# Alpine), compile-check the C code against the host, and boot both images
+# in QEMU (BIOS and UEFI; BIOS for i686). release.yml runs this same
 # workflow for v* tags before it publishes anything.
 name: build
 
@@ -76,6 +77,63 @@ jobs:
           if-no-files-found: error
           compression-level: 0   # already xz / zip
 
+  image-i686:
+    # The 32-bit image (README, "32-bit machines"). The runner's JavaScript
+    # actions (checkout, cache, upload) cannot run inside a 32-bit container,
+    # so this job runs on the Ubuntu runner and does the build in a
+    # `docker run --platform linux/386 alpine:3.24` step with the workspace
+    # mounted, under `setarch i686` like `ARCH=x86 scripts/alpine-env.sh run`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0   # tags, for git describe
+
+      - name: Cache downloads (Mbed TLS)
+        uses: actions/cache@v4
+        with:
+          path: build/downloads
+          key: downloads-${{ hashFiles('scripts/build-fujinet.sh', 'scripts/alpine-env.sh') }}
+
+      - name: Emulator, FujiNet-PC and image in a 32-bit Alpine
+        env:
+          DEV_SSH_KEY: '0'   # as for the x86_64 image
+        run: |
+          docker run --rm -i --platform linux/386 \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e ARCH=x86 -e DEV_SSH_KEY -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            alpine:3.24 sh -e <<'EOF'
+          apk add --no-cache util-linux-misc $(scripts/alpine-env.sh pkgs)
+          git config --global --add safe.directory '*'
+          [ "$(apk --print-arch)" = x86 ] || { echo "not a 32-bit Alpine: $(apk --print-arch)" >&2; exit 1; }
+          setarch i686 sh -ec '
+            uname -m
+            scripts/build-emulator.sh
+            scripts/build-fujinet.sh
+            scripts/mkimage.sh
+          '
+          cd build
+          img=$(ls atari-os-x86-*-i686.img)
+          zip=$(ls atari-os-x86-*-i686-files.zip)
+          xz -T0 -6 -k -f "$img"
+          sha256sum "$img.xz" "$zip" > SHA256SUMS-i686
+          cat SHA256SUMS-i686
+          ls -la "$img" "$img.xz" "$zip"
+          chown -R "$HOST_UID:$HOST_GID" /work/build
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-i686
+          path: |
+            build/atari-os-x86-*-i686.img.xz
+            build/atari-os-x86-*-i686-files.zip
+            build/SHA256SUMS-i686
+          if-no-files-found: error
+          compression-level: 0
+
   host-build:
     # The -Werror check: atari800's configure appends -Werror, and the port
     # builds with -ansi -pedantic, so non-C89 code fails here. Same as
@@ -115,9 +173,30 @@ jobs:
         run: gcc -static -Os -Wall -Wextra -Werror -Icommon -o "$RUNNER_TEMP/init" init/init.c
 
   smoke:
-    needs: image
+    needs: [image, image-i686]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            artifact: image
+            modes: bios uefi
+            system: qemu-system-x86_64
+            cpu: ''        # the host's, with KVM
+            mem: ''        # 1024
+          - arch: i686
+            artifact: image-i686
+            modes: bios    # Ubuntu's ovmf has no 32-bit build
+            system: qemu-system-i386
+            cpu: n270      # an Atom netbook, no 64-bit mode
+            mem: '512'
+    name: smoke (${{ matrix.arch }})
+    env:
+      QEMU_SYSTEM: ${{ matrix.system }}
+      QEMU_CPU: ${{ matrix.cpu }}   # empty = the harness's default
+      QEMU_MEM: ${{ matrix.mem }}
     steps:
       - uses: actions/checkout@v4   # for scripts/qemu-test.sh
 
@@ -138,13 +217,13 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: image
+          name: ${{ matrix.artifact }}
           path: build
 
       - name: Unpack
         run: |
           cd build
-          sha256sum -c SHA256SUMS
+          sha256sum -c SHA256SUMS*
           unxz atari-os-x86-*.img.xz
           ls -la
 
@@ -156,7 +235,7 @@ jobs:
           QEMU_IMG=$(ls build/atari-os-x86-*.img)
           export QEMU_IMG
           rc=0
-          for mode in bios uefi; do
+          for mode in ${{ matrix.modes }}; do
             export QEMU_TEST_DIR="$GITHUB_WORKSPACE/build/qemu-test/$mode"
             echo "::group::$mode"
             scripts/qemu-test.sh start "$mode"
@@ -178,7 +257,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke
+          name: smoke-${{ matrix.arch }}
           path: |
             build/qemu-test/*/*.png
             build/qemu-test/*/*.log

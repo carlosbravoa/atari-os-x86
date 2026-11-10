@@ -1,6 +1,7 @@
-# On a v* tag: the whole build workflow (image, host build, QEMU smoke
-# boot), then a GitHub release with the image, the dual-boot files zip, its
-# checksums, flash.sh and the two dual-boot installers.
+# On a v* tag: the whole build workflow (both images, host build, QEMU
+# smoke boots), then a GitHub release with the x86_64 and i686 images, their
+# dual-boot files zips, one SHA256SUMS, flash.sh and the two dual-boot
+# installers.
 name: release
 
 on:
@@ -23,7 +24,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: image
+          pattern: image*   # image (x86_64) and image-i686
+          merge-multiple: true
           path: build
 
       - name: Create the release
@@ -31,7 +33,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          ls build/atari-os-x86-"$TAG".img.xz build/atari-os-x86-"$TAG"-files.zip   # both must carry the tag's version
+          # all four must carry the tag's version
+          ls build/atari-os-x86-"$TAG".img.xz build/atari-os-x86-"$TAG"-files.zip \
+             build/atari-os-x86-"$TAG"-i686.img.xz build/atari-os-x86-"$TAG"-i686-files.zip
+          cat build/SHA256SUMS-i686 >> build/SHA256SUMS && rm build/SHA256SUMS-i686
           (cd scripts && sha256sum flash.sh install-linux.sh install-windows.ps1) >> build/SHA256SUMS
           cat build/SHA256SUMS
           sed -e "s|@TAG@|$TAG|g" -e "s|@REPO@|$GITHUB_REPOSITORY|g" .github/release-template.md > build/notes.md

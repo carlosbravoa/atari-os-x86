@@ -4,6 +4,10 @@ All notable changes to atari-os-x86. Versions are git tags (`v0.1.0`); the
 image, the boot splash, the System menu's hardware page and init's `status`
 reply all show the version they were built from.
 
+## Unreleased
+
+- CI builds the 32-bit image too (`image-i686`: a `docker run --platform linux/386 alpine:3.24` step on the Ubuntu runner, under `setarch i686`, since GitHub's own actions cannot run inside a 32-bit container) and smoke-boots it in QEMU as an Atom N270 with 512 MB; releases attach `atari-os-x86-<version>-i686.img.xz` and its files zip, with their checksums in the one `SHA256SUMS` (v0.2.0's were attached by hand)
+
 ## v0.2.0 (2026-11-09)
 
 - Closing the lid turns the laptop's panel off (connector DPMS) and pauses the emulator and its sound; opening it brings the picture back with the frame pacing and the just-in-time frame started afresh (the first flips after the wake give no input-lag or wake-up sample). The lid is the ACPI `Lid Switch` evdev device (`EV_SW`/`SW_LID`), read at start too, so a machine booted or an emulator restarted under a closed lid starts paused. A System, Help or Library menu open at the time closes (as with F1/F8/F9 inside it); keys pressed with the lid shut are dropped; USB drives are still mounted and unmounted. Nothing happens with an external monitor driving the picture. Log lines `kms: lid closed, screen off, paused` and `kms: lid open, screen on`

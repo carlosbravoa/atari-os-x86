@@ -701,18 +701,23 @@ QEMU_IMG=build/atari-os-i686.img QEMU_SYSTEM=qemu-system-i386 QEMU_CPU=n270 QEMU
 files (emulator, FujiNet, stage, initramfs, modloop) live under
 `build/i686/`, `build/atari-os-i686.img` is its hard link, and each
 architecture's build removes only its own older images. The modloop is
-smaller (about 150 MB against 195 MB). CI does not build it yet.
+smaller (about 150 MB against 195 MB). CI builds it too (the `image-i686`
+job: a `docker run --platform linux/386 alpine:3.24` step, since the
+runner's own actions cannot run inside a 32-bit container) and boots it in
+QEMU as an Atom N270 with 512 MB; releases attach it.
 
 ### Releases and CI
 
 `.github/workflows/build.yml` runs on every push and pull request: the image
 in an `alpine:3.24` container (uploaded as the `image` artifact, `.img.xz`
-plus `SHA256SUMS`), the emulator against Ubuntu's libraries with
-`-Werror` (the C89 check) plus a static `init`, and a smoke boot of the
-image in QEMU, BIOS and UEFI, that fails unless the emulator starts
-(screenshots and serial logs in the `smoke` artifact). Pushing a `v*` tag
-runs `release.yml`: the same workflow, then a GitHub release with the
-image, the dual-boot files zip, `SHA256SUMS`, `flash.sh`,
+plus `SHA256SUMS`), the 32-bit image in a 32-bit Alpine (`image-i686`,
+with `SHA256SUMS-i686`), the emulator against Ubuntu's libraries with
+`-Werror` (the C89 check) plus a static `init`, and a smoke boot of each
+image in QEMU, BIOS and UEFI for x86_64 and BIOS for i686, that fails
+unless the emulator starts (screenshots and serial logs in the
+`smoke-x86_64` and `smoke-i686` artifacts). Pushing a `v*` tag runs
+`release.yml`: the same workflow, then a GitHub release with both images,
+their dual-boot files zips, one `SHA256SUMS`, `flash.sh`,
 `install-linux.sh` and `install-windows.ps1`, its text from
 `.github/release-template.md` above the generated notes. `CHANGELOG.md`
 lists the changes. `tests/flash-test.sh` tests `flash.sh` without touching
