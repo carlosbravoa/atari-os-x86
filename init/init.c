@@ -1663,6 +1663,9 @@ static void power_mode(int fast)
    the last connect request becomes the "wifierr" status line. */
 static void wpa(const char *a1, const char *a2, const char *a3, char *out, size_t size);
 
+
+static void wifi_power_save_off(void);
+
 /* Is any network configured? NETWORK-NOT-FOUND also comes after scans
    with nothing configured, which is no failure. */
 static int wpa_has_network(void)
@@ -1738,8 +1741,10 @@ static void wpa_mon_read(void)
 			if (wifi_scanned && wpa_has_network())
 				snprintf(wifi_err, sizeof wifi_err, "network not found");
 		}
-		else if (strstr(ev, "CTRL-EVENT-CONNECTED"))
+		else if (strstr(ev, "CTRL-EVENT-CONNECTED")) {
 			wifi_err[0] = '\0';
+			wifi_power_save_off();
+		}
 		/* keep the log small: start over past 256 KB */
 		f = fopen(WPA_LOG, stat(WPA_LOG, &st) == 0 && st.st_size > 256 * 1024 ? "w" : "a");
 		if (f) {
@@ -1748,6 +1753,20 @@ static void wpa_mon_read(void)
 			fclose(f);
 		}
 	}
+}
+
+/* 802.11 power saving off, whatever the driver: an idle link that sleeps
+   between beacons answers late or (rtl8192ce on a ThinkPad X230) not at
+   all, ARP included, so SSH and FujiNet's web page cannot reach a laptop
+   that itself can reach everything. The modprobe options in the
+   initramfs cover iwlwifi and rtlwifi at load time; this covers the rest
+   and is repeated at every connection. A laptop that is an Atari is on
+   its charger or does not mind the fraction of a watt. */
+static void wifi_power_save_off(void)
+{
+	char *ps[] = { "/usr/sbin/iw", "dev", wifi_iface, "set", "power_save", "off", NULL };
+	if (wifi_iface[0] && exists(ps[0]))
+		run(ps);
 }
 
 /* No network manager: every wired interface gets DHCP in the background.
@@ -1792,6 +1811,7 @@ static void start_network(void)
 			mkdir_p(WPA_CTRL_DIR, 0755);
 			snprintf(wifi_iface, sizeof wifi_iface, "%.31s", e->d_name);
 			run(wpa);
+			wifi_power_save_off();
 			dhcp_retry[3] = e->d_name;
 			(void)dhcp;
 			run(dhcp_retry);

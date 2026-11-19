@@ -211,6 +211,13 @@ printf 'blacklist snd_pcsp\nblacklist pcspkr\n' > "$INITRAMFS/etc/modprobe.d/bla
 # latency to inbound packets on an idle link, which makes SSH and FujiNet
 # feel broken.
 printf 'options iwlmvm power_scheme=1\noptions iwlwifi power_save=0\n' > "$INITRAMFS/etc/modprobe.d/iwlwifi.conf"
+# Realtek (rtlwifi PCI): the same, by its three switches (inactive, software
+# and firmware power save). Seen on an rtl8192ce: the laptop reaches
+# everything and answers nothing. init also turns 802.11 power save off
+# with iw for every driver.
+for m in rtl8192ce rtl8192se rtl8192de rtl8188ee rtl8192ee rtl8723ae rtl8723be rtl8821ae; do
+	echo "options $m ips=0 swlps=0 fwlps=0"
+done > "$INITRAMFS/etc/modprobe.d/rtlwifi.conf"
 echo "atari" > "$INITRAMFS/etc/hostname"
 echo "$VERSION" > "$INITRAMFS/etc/atari-os-release"
 printf '127.0.0.1 localhost atari\n' > "$INITRAMFS/etc/hosts"
