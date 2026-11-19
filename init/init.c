@@ -249,6 +249,26 @@ static int ms_until(double t)
 	return (int)d + 1;
 }
 
+/* Start a program and do not wait for it (PID 1's SIGCHLD loop reaps it
+   like any child it does not know). For helpers that take their time and
+   whose result nothing here needs: the DHCP clients. */
+static void run_nowait(char *const argv[])
+{
+	pid_t pid = fork();
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR);
+		if (null >= 0) {
+			dup2(null, 0);
+			dup2(null, 1);
+			dup2(null, 2);
+			if (null > 2)
+				close(null);
+		}
+		execv(argv[0], argv);
+		_exit(127);
+	}
+}
+
 /* Run a program to completion; returns its exit status or -1. */
 static int run(char *const argv[])
 {
@@ -1814,7 +1834,7 @@ static void start_network(void)
 			wifi_power_save_off();
 			dhcp_retry[3] = e->d_name;
 			(void)dhcp;
-			run(dhcp_retry);
+			run_nowait(dhcp_retry); /* (not waited for: see below) */
 			logmsg("wifi: wpa_supplicant and dhcp started on %s", e->d_name);
 			wpa_mon_open();
 			continue;
@@ -1822,8 +1842,13 @@ static void start_network(void)
 		dhcp_retry[3] = e->d_name;
 		(void)dhcp;
 		/* -b: background on failure and keep trying, so a cable plugged in
-		   later still gets an address. */
-		run(dhcp_retry);
+		   later still gets an address. Not waited for: udhcpc only goes to
+		   the background after its first tries have failed, 15 s on an
+		   interface with nobody answering (no cable; Wi-Fi that has not
+		   joined yet), and the emulator was started after all of them: 31 s
+		   of a ThinkPad X230's 36 s boot. Nothing below needs the address;
+		   the script sets the clock when it comes. */
+		run_nowait(dhcp_retry);
 		logmsg("dhcp started on %s", e->d_name);
 	}
 	closedir(d);
