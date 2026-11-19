@@ -6,6 +6,7 @@ reply all show the version they were built from.
 
 ## Unreleased
 
+- Sound level: the outputs behind the master volume (Speaker, Headphone, PCM, ...) go to the top of their range at start instead of 80 %, so F8's Sound setting is the whole of the volume (a ThinkPad X230 had Master, Speaker and Headphone each holding 13 dB back at "100%"); inputs that play straight through to the speakers (Mic, Dock Mic, Beep, Loopback) are switched off instead of on (the laptop's microphone was playing through its own speakers). One log line per control (`alsa: mixer: Speaker 87 of 0..87`)
 - Wi-Fi power saving is off for every card, not only Intel's: init runs `iw dev <interface> set power_save off` when it starts wpa_supplicant and at every connection, and the Realtek rtlwifi PCI drivers load with `ips=0 swlps=0 fwlps=0`. With it on, a ThinkPad X230's rtl8192ce joined, got its address and could connect out, but answered nothing sent to it once idle (ARP included), so SSH and FujiNet's web page could not reach it: 0 of 6 pings 20 s apart answered with power save on, 9 of 9 with it off (measured in the Atari816 fork, same init code)
 - CI builds the 32-bit image too (`image-i686`: a `docker run --platform linux/386 alpine:3.24` step on the Ubuntu runner, under `setarch i686`, since GitHub's own actions cannot run inside a 32-bit container) and smoke-boots it in QEMU as an Atom N270 with 512 MB; releases attach `atari-os-x86-<version>-i686.img.xz` and its files zip, with their checksums in the one `SHA256SUMS` (v0.2.0's were attached by hand)
 

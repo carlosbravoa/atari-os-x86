@@ -218,14 +218,43 @@ static void unmute_mixer(void)
 		long min, max;
 		if (!snd_mixer_selem_is_active(elem))
 			continue;
+		{
+			/* An input's way straight to the speakers (the microphone, a
+			   line input, the PC beeper): off, not on. Unmuting every
+			   switch had the laptop's microphone playing through its own
+			   speakers. */
+			const char *name = snd_mixer_selem_get_name(elem);
+			if (strstr(name, "Mic") != NULL || strstr(name, "Beep") != NULL || strstr(name, "Loopback") != NULL
+			    || strstr(name, "Line In") != NULL || strcmp(name, "Line") == 0 || strcmp(name, "CD") == 0
+			    || strcmp(name, "Aux") == 0) {
+				if (snd_mixer_selem_has_playback_switch(elem))
+					snd_mixer_selem_set_playback_switch_all(elem, 0);
+				Log_print("alsa: mixer: %s off (an input)", name);
+				continue;
+			}
+		}
 		if (snd_mixer_selem_has_playback_switch(elem)) {
 			snd_mixer_selem_set_playback_switch_all(elem, 1);
 			unmuted++;
 		}
 		if (snd_mixer_selem_has_playback_volume(elem)
 		    && snd_mixer_selem_get_playback_volume_range(elem, &min, &max) == 0 && max > min) {
-			/* 80% of the range: audible on every laptop tried, not painful */
-			snd_mixer_selem_set_playback_volume_all(elem, min + (max - min) * 4 / 5);
+			/* The outputs behind the master volume go to the top of their
+			   range, so the menu's Sound setting is the whole of the
+			   volume: at 80% each, "Sound: 100%" was three controls in a
+			   row each holding some back (a ThinkPad X230: Master, PCM,
+			   Speaker). Everything else keeps 80% of its range, and Master
+			   itself is the menu's (KMS_SYSMENU_ApplySettings). */
+			static const char *const outputs[] = { "PCM", "Speaker", "Headphone", "Front", "Line Out",
+			                                       "Bass Speaker", "Surround", "Center", "LFE", NULL };
+			const char *name = snd_mixer_selem_get_name(elem);
+			long level = min + (max - min) * 4 / 5;
+			int i;
+			for (i = 0; outputs[i]; i++)
+				if (strcmp(name, outputs[i]) == 0)
+					level = max;
+			snd_mixer_selem_set_playback_volume_all(elem, level);
+			Log_print("alsa: mixer: %s %ld of %ld..%ld", name, level, min, max);
 		}
 	}
 	snd_mixer_close(mixer);
