@@ -24,11 +24,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <alsa/asoundlib.h>
+#include <unistd.h>
 
 #include "atari.h"
 #include "log.h"
 #include "platform.h"
 #include "sound.h"
+#include "antic.h"
 #include "kms/kms_sysmenu.h"
 
 static snd_pcm_t *pcm = NULL;
@@ -388,6 +390,49 @@ static int recover(int err)
 	return FALSE;
 }
 
+/* For finding out why something sounds wrong on a real laptop: while the
+   file ALSA_DUMP_FLAG exists, every frame that reaches the device is also
+   appended to ALSA_DUMP_RAW (S16, the device's channels and rate), and
+   frames dropped because the device was full are counted in the log. */
+#define ALSA_DUMP_FLAG "/run/alsa-dump"
+#define ALSA_DUMP_RAW "/run/alsa-dump.raw"
+static FILE *dump_fp = NULL;
+static int dump_check = 0;
+static unsigned long dump_dropped = 0;
+static long core_credit = 0; /* frames the core has made and we have not taken (PLATFORM_SoundAvailable) */
+static double stat_in = 0, stat_out = 0; /* frames from the core, frames to the device */
+
+static void dump_poll(void)
+{
+	if (++dump_check < 50)
+		return;
+	dump_check = 0;
+	if (access(ALSA_DUMP_FLAG, F_OK) == 0) {
+		if (!dump_fp) {
+			dump_fp = fopen(ALSA_DUMP_RAW, "wb");
+			dump_dropped = 0;
+			Log_print("alsa: dumping to " ALSA_DUMP_RAW " (%u Hz, %u channels)", pcm_rate, frame_bytes / 2);
+		}
+	}
+	else if (dump_fp) {
+		fclose(dump_fp);
+		dump_fp = NULL;
+		Log_print("alsa: dump closed, %lu frames were dropped (device full)", dump_dropped);
+	}
+}
+
+static void dump_frames(const unsigned char *p, size_t bytes)
+{
+	if (dump_fp)
+		fwrite(p, 1, bytes, dump_fp);
+}
+
+static void dump_note(long frames)
+{
+	if (dump_fp && frames < 0)
+		dump_dropped += (unsigned long)-frames;
+}
+
 unsigned int PLATFORM_SoundAvailable(void)
 {
 	snd_pcm_sframes_t avail;
@@ -403,6 +448,35 @@ unsigned int PLATFORM_SoundAvailable(void)
 	}
 	if ((snd_pcm_uframes_t)avail > buffer_frames)
 		avail = buffer_frames;
+	if (dump_fp) { /* once a frame: the rates, every 5 s */
+		static unsigned calls = 0;
+		static struct timespec t0;
+		static unsigned int clk0 = 0, big = 0, clkmax = 0, clkmin = 0xffffffffu;
+		static double clksum = 0;
+		struct timespec t1;
+		unsigned int d = ANTIC_CPU_CLOCK - clk0;
+		clk0 = ANTIC_CPU_CLOCK;
+		clksum += d;
+		if (d > clkmax) clkmax = d;
+		if (d < clkmin) clkmin = d;
+		if (d > 30000) big++;
+		if (calls == 299) {
+			Log_print("alsa: cpu ticks between calls: mean %.1f, min %u, max %u, over 30000: %u of 300", clksum / 300, clkmin, clkmax, big);
+			clksum = 0; big = 0; clkmax = 0; clkmin = 0xffffffffu;
+		}
+		if (++calls >= 300) {
+			double dt;
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			dt = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+			if (t0.tv_sec != 0 && dt > 0)
+				Log_print("alsa: rates over %.2f s (%.2f calls/s): core %.0f frames/s, device %.0f frames/s, fill %ld of %lu, ratio %.5f",
+				          dt, calls / dt, stat_in / dt, stat_out / dt,
+				          (long)buffer_frames - (long)avail, (unsigned long)buffer_frames, drc_ratio);
+			t0 = t1;
+			calls = 0;
+			stat_in = stat_out = 0;
+		}
+	}
 	if (drc_on) {
 		/* The fill is read once per frame, just before the frame's samples
 		   go in, so it is at its lowest. Aim one period plus one frame
@@ -421,6 +495,40 @@ unsigned int PLATFORM_SoundAvailable(void)
 		drc_ratio += 0.1 * (want - drc_ratio);
 		/* in input frames: what fits once resampled */
 		avail = (snd_pcm_sframes_t)((double)avail / drc_ratio);
+
+		/* Never ask the core for more than it has made. Whatever room we
+		   report, the core fills (sound.c WriteOut), and what it does not
+		   have it makes up by repeating its last sample: with the room up
+		   to the brim reported every frame, the device was always full,
+		   the ratio above ran to its lower limit to "use the input up
+		   faster", and the core answered with 0.5 % of held samples, 200
+		   a second in lumps of twenty: a tone that stumbles nine times a
+		   second (a ThinkPad X230, whose panel runs at 59.91 Hz, so there
+		   never was a surplus to use up). The core makes its samples from
+		   the CPU clock, so we know how many there are; only below the
+		   target by more than half a period (the start, after a pause)
+		   may it pad the device up to the target. */
+		{
+			static unsigned int clk_prev = 0;
+			static double carry = 0;
+			double tpf = (double)Atari800_tv_mode * 114.0;
+			double fps = Atari800_tv_mode == Atari800_TV_PAL ? Atari800_FPS_PAL : Atari800_FPS_NTSC;
+			double made = (double)(unsigned int)(ANTIC_CPU_CLOCK - clk_prev);
+			long ask;
+			clk_prev = ANTIC_CPU_CLOCK;
+			if (made > 2.0 * tpf)
+				made = tpf; /* a pause, a menu, the very first call */
+			made = made * ((double)pcm_rate / fps) / tpf + carry;
+			core_credit += (long)made;
+			carry = made - (double)(long)made;
+			if (core_credit > (long)buffer_frames)
+				core_credit = (long)buffer_frames; /* turbo: the core skips its samples */
+			ask = core_credit;
+			if (fill + (double)ask * drc_ratio < target - span / 2.0)
+				ask = (long)((target - fill) / drc_ratio);
+			if ((long)avail > ask)
+				avail = (snd_pcm_sframes_t)ask;
+		}
 	}
 	return (unsigned int)avail * frame_bytes;
 }
@@ -429,15 +537,20 @@ unsigned int PLATFORM_SoundAvailable(void)
 static void write_frames(const void *buf, snd_pcm_uframes_t frames)
 {
 	const unsigned char *p = buf;
+	dump_poll();
 	while (frames > 0) {
 		snd_pcm_sframes_t n = snd_pcm_writei(pcm, p, frames);
 		if (n < 0) {
-			if (n == -EAGAIN)
+			if (n == -EAGAIN) {
+				dump_note(-(long)frames); /* these frames are dropped */
 				return;
+			}
 			if (!recover((int)n))
 				return;
 			continue;
 		}
+		dump_frames(p, (size_t)n * frame_bytes);
+		stat_out += (double)n;
 		p += n * frame_bytes;
 		frames -= n;
 	}
@@ -450,12 +563,37 @@ void PLATFORM_SoundWrite(UBYTE const *buffer, unsigned int size)
 	double step;
 	if (!pcm || n_in == 0)
 		return;
+	stat_in += (double)n_in;
+	core_credit -= (long)n_in < core_credit ? (long)n_in : core_credit;
+	if (dump_fp) { /* what the core hands us, before the rate control */
+		static FILE *in_fp = NULL;
+		static FILE *in_of = NULL;
+		if (in_of != dump_fp) {
+			if (in_fp)
+				fclose(in_fp);
+			in_fp = fopen(ALSA_DUMP_RAW ".in", "wb");
+			in_of = dump_fp;
+			Log_print("alsa: dump: core writes %u frames a call, ratio %.5f", n_in, drc_ratio);
+		}
+		if (in_fp) {
+			fwrite(buffer, 1, size, in_fp);
+			fflush(in_fp);
+		}
+	}
+	ch = frame_bytes / 2;
 	if (!drc_on || (drc_ratio > 0.99999 && drc_ratio < 1.00001)) {
 		drc_pos = 0.0;
+		/* the resampler's "frame before this chunk" must follow along:
+		   left as it was, the first frame after the ratio leaves 1.0 was
+		   interpolated from a sample of long ago (a one-sample click each
+		   time the ratio crossed 1.0, about once a second when it hovers
+		   there) */
+		if (drc_on)
+			for (i = 0; i < ch; i++)
+				drc_last[i] = in[(n_in - 1) * ch + i];
 		write_frames(buffer, n_in);
 		return;
 	}
-	ch = frame_bytes / 2;
 	step = 1.0 / drc_ratio;
 	if (drc_buf_frames < n_in + n_in / 50 + 4) {
 		free(drc_buf);
