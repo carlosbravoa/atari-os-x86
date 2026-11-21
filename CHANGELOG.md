@@ -4,7 +4,7 @@ All notable changes to atari-os-x86. Versions are git tags (`v0.1.0`); the
 image, the boot splash, the System menu's hardware page and init's `status`
 reply all show the version they were built from.
 
-## Unreleased
+## v0.2.1 (2026-11-21)
 
 - Start-up no longer waits for the network: the DHCP clients are started and left to it. Each one only went to the background after 15 s without an answer (no cable, Wi-Fi not joined yet), and the emulator was started after all of them: a ThinkPad X230 took 36 s to the picture, 31 of them this (measured in the Atari816 fork, same init code; in QEMU with one unanswered interface the emulator starts at 6 s instead of 23 s, and the address still arrives when it arrives)
 - The Atari's sound no longer stumbles on panels a little slower than the Atari (a ThinkPad X230 at 59.91 Hz: nine stretched cycles a second in a steady tone, 1.7 % of its half-cycles). The emulator core fills whatever room the sound port reports and pads what it lacks by repeating its last sample; the port reported the whole free room, the rate control then ran to its lower limit and the core padded 0.5 %. The port now reports no more room than the core has samples for (it knows from the CPU clock), and the resampler no longer clicks when the ratio crosses 1.0 (0 irregular half-cycles of 11,366 afterwards, ratio 1.0001; measured in the Atari816 fork on the same sound path). For diagnosis: while `/run/alsa-dump` exists the frames reaching the device are recorded to `/run/alsa-dump.raw` and the log has the core's and the device's rates every 5 s

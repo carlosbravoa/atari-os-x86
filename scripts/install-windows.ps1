@@ -62,10 +62,10 @@ The title of the entries (default "Atari").
 .\install-windows.ps1 -Check
 
 .EXAMPLE
-.\install-windows.ps1 -Zip .\atari-os-x86-v0.2.0-files.zip -ShrinkMB 2048 -WhatIf
+.\install-windows.ps1 -Zip .\atari-os-x86-v0.2.1-files.zip -ShrinkMB 2048 -WhatIf
 
 .EXAMPLE
-.\install-windows.ps1 -Zip .\atari-os-x86-v0.2.0-files.zip -Partition E: -BootNow
+.\install-windows.ps1 -Zip .\atari-os-x86-v0.2.1-files.zip -Partition E: -BootNow
 
 .EXAMPLE
 .\install-windows.ps1 -Remove

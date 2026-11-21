@@ -26,7 +26,7 @@ erases the stick. Pick one:
   the stick back to verify it:
 
   ```sh
-  bash flash.sh atari-os-x86-v0.2.0.img.xz
+  bash flash.sh atari-os-x86-v0.2.1.img.xz
   ```
 
   `--dry-run` shows the disks and the plan without writing; `--help` for
@@ -128,8 +128,8 @@ LVM, RAID or encrypted; an empty FAT32 one, or with `--format` one you no
 longer need):
 
 ```sh
-sudo sh install-linux.sh --partition /dev/sdb3 atari-os-x86-v0.2.0-files.zip
-sudo sh install-linux.sh --partition /dev/sdb3 --format atari-os-x86-v0.2.0-files.zip   # erases sdb3 first
+sudo sh install-linux.sh --partition /dev/sdb3 atari-os-x86-v0.2.1-files.zip
+sudo sh install-linux.sh --partition /dev/sdb3 --format atari-os-x86-v0.2.1-files.zip   # erases sdb3 first
 ```
 
 The files are unpacked onto the partition (a normal FAT32 drive, so you can
@@ -142,7 +142,7 @@ loop-mounts it, and the Atari uses the FAT inside it read-write (your
 library and settings live in that file):
 
 ```sh
-sudo sh install-linux.sh --image /home/atari.img atari-os-x86-v0.2.0.img.xz
+sudo sh install-linux.sh --image /home/atari.img atari-os-x86-v0.2.1.img.xz
 ```
 
 The path may only contain letters, digits and `. _ + - /`. Not on LVM or
@@ -169,8 +169,8 @@ stays for you to delete.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Check
-powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Zip atari-os-x86-v0.2.0-files.zip -ShrinkMB 2048
-powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Zip atari-os-x86-v0.2.0-files.zip -Partition E:
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Zip atari-os-x86-v0.2.1-files.zip -ShrinkMB 2048
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Zip atari-os-x86-v0.2.1-files.zip -Partition E:
 ```
 
 `-ShrinkMB n` (1536 to 32768) shrinks `C:` by n MB and makes a FAT32
